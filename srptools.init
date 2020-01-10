@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# Bring up/down the SRP client daemon
+#
+# chkconfig: - 25 75
+# description: Starts/Stops InfiniBand SRP client service
+# config:	/etc/srp_daemon.conf
+#
+### BEGIN INIT INFO
+# Provides:       srpd
+# Default-Stop: 0 1 2 3 4 5 6
+# Required-Stop:
+# Short-Description: Starts and stops the InfiniBand SRP client service
+# Description: The InfiniBand SRP client service attaches to SRP devices
+#	on the InfiniBand fabric and makes them appear as local disks to
+#	to the system.  This service starts the client daemon that's
+#	responsible for initiating and maintaining the connections to
+#	remote devices.
+### END INIT INFO
+
+CONFIG=/etc/srp_daemon.conf
+RDMA_CONFIG=/etc/rdma/rdma.conf
+pidfile=/var/run/srp_daemon.sh.pid
+subsys=/var/lock/subsys/srpd
+prog=/usr/sbin/srp_daemon.sh
+
+. /etc/rc.d/init.d/functions
+
+SRP_LOADED=no
+if [ -f $RDMA_CONFIG ]; then
+    . $CONFIG
+    if [ "${SRP_LOAD}" == "yes" ]; then
+	SRP_LOADED=yes
+    fi
+fi
+
+start()
+{
+    if [ "$SRP_LOADED" == "no" ]; then
+	return 6
+    fi
+
+    echo -n "Starting SRP daemon service:"
+
+    daemon $prog
+    RC=$?
+    [ $RC -eq 0 ] && touch $subsys
+    echo
+    return $RC
+}
+
+stop()
+{
+    echo -n "Stopping SRP daemon service:"
+
+    killproc -p $pidfile -d 2 srp_daemon.sh
+    RC=$?
+    rm -f $subsys
+    echo
+    return $RC
+}
+
+status()
+{
+    if [ ! -f $subsys -a ! -f $pidfile ]; then
+    	return 3
+    fi
+    if [ -f $pidfile ]; then
+	checkpid `cat $pidfile`
+	return $?
+    fi
+    if [ -f $subsys ]; then
+	return 2
+    fi
+}
+
+restart ()
+{
+    stop
+    start
+}
+
+condrestart ()
+{
+    [ -e $subsys ] && restart || return 0
+}
+
+usage ()
+{
+    echo
+    echo "Usage: `basename $0` {start|stop|restart|condrestart|try-restart|force-reload|status}"
+    echo
+    return 2
+}
+
+case $1 in
+    start|stop|restart|condrestart|try-restart|force-reload)
+	[ `id -u` != "0" ] && exit 4 ;;
+esac
+
+case $1 in
+    start) start; RC=$? ;;
+    stop) stop; RC=$? ;;
+    restart) restart; RC=$? ;;
+    reload) RC=3 ;;
+    condrestart) condrestart; RC=$? ;;
+    try-restart) condrestart; RC=$? ;;
+    force-reload) condrestart; RC=$? ;;
+    status) status; RC=$? ;;
+    *) usage; RC=$? ;;
+esac
+
+exit $RC
