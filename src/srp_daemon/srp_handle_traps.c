@@ -152,25 +152,20 @@ int modify_qp_to_err(struct ibv_qp *qp)
 *****************************************************************************/
 static int fill_rq_entry(struct ud_resources *res, int cur_receive)
 {
-	static struct ibv_recv_wr rr;
-	static struct ibv_sge sg;
-	static int first = 1;
+	struct ibv_recv_wr rr;
+	struct ibv_sge sg;
 	struct ibv_recv_wr *_bad_wr = NULL;
 	struct ibv_recv_wr **bad_wr = &_bad_wr;
 	int ret;
 
-	/* prepare the RR */
-	if (first) {
-		first = 0;
-		memset(&rr, 0, sizeof(rr));
+	memset(&rr, 0, sizeof(rr));
 
-		sg.length = RECV_BUF_SIZE;
-		sg.lkey = res->mr->lkey;
+	sg.length = RECV_BUF_SIZE;
+	sg.lkey = res->mr->lkey;
 
-		rr.next = NULL;
-		rr.sg_list = &sg;
-		rr.num_sge = 1;
-	}
+	rr.next = NULL;
+	rr.sg_list = &sg;
+	rr.num_sge = 1;
 
 	sg.addr = (((unsigned long)res->recv_buf) + RECV_BUF_SIZE * cur_receive);
 	rr.wr_id = cur_receive;
@@ -277,7 +272,7 @@ int ud_resources_create(struct ud_resources *res)
 	size = cq_size * RECV_BUF_SIZE + SEND_SIZE;
 	res->recv_buf = malloc(size);
 	if (!res->recv_buf) {
-		pr_err("failed to malloc %Zu bytes to memory buffer\n", size);
+		pr_err("failed to malloc %zu bytes to memory buffer\n", size);
 		return -ENOMEM;
 	}
 
@@ -730,7 +725,7 @@ static int get_trap_notices(struct resources *res)
 			if (ret) {
 				pr_err("get_trap_notices: Got Bad pkey_index (%d)\n",
 				       pkey_index);
-				wake_up_main_loop();
+				wake_up_main_loop(0);
 				break;
 			}
 
@@ -753,7 +748,7 @@ static int get_trap_notices(struct resources *res)
 
 		ret = fill_rq_entry(res->ud_res, cur_receive);
 		if (ret < 0) {
-			wake_up_main_loop();
+			wake_up_main_loop(0);
 			break;
 		}
 	}
@@ -818,7 +813,7 @@ void *run_thread_listen_to_events(void *res_in)
 			if (event.element.port_num == config->port_num) {
 				pthread_mutex_lock(&res->sync_res->mutex);
 				__schedule_rescan(res->sync_res, 0);
-				wake_up_main_loop();
+				wake_up_main_loop(0);
 				pthread_mutex_unlock(&res->sync_res->mutex);
 			}
 		  	break;
@@ -827,9 +822,10 @@ void *run_thread_listen_to_events(void *res_in)
 		case IBV_EVENT_CQ_ERR:
 		case IBV_EVENT_QP_FATAL:
 		  /* clean and restart */
-			pr_err("Critical event %d, ending\n", event.event_type);
-			exit(EAGAIN);
-
+			pr_err("Critical event %d, raising catastrophic "
+			       "error signal\n", event.event_type);
+			raise(SRP_CATAS_ERR);
+			break;
 
  	      	 /*
 

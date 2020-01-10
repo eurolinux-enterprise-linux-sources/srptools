@@ -84,22 +84,46 @@ static int get_lid(struct umad_resources *umad_res, ib_gid_t *gid, uint16_t *lid
 static const int   node_table_response_size = 1 << 18;
 static char *sysfs_path = "/sys";
 static enum log_dest s_log_dest = log_to_syslog;
-static int received_signal, wakeup_pipe[2] = { -1, -1 };
+static int wakeup_pipe[2] = { -1, -1 };
 
 
-void wake_up_main_loop(void)
+void wake_up_main_loop(char ch)
 {
 	int res;
 
 	assert(wakeup_pipe[1] >= 0);
-	res = write(wakeup_pipe[1], ".", 1);
+	res = write(wakeup_pipe[1], &ch, 1);
 	IGNORE(res);
 }
 
 static void signal_handler(int signo)
 {
-	received_signal = signo;
-	wake_up_main_loop();
+	wake_up_main_loop(signo);
+}
+
+/*
+ * Return either the received signal (SIGINT, SIGTERM, ...) or 0 if no signal
+ * has been received before the timeout has expired.
+ */
+static int get_received_signal(time_t tv_sec, suseconds_t tv_usec)
+{
+	int fd, ret, received_signal = 0;
+	fd_set rset;
+	struct timeval timeout;
+	char buf[16];
+
+	fd = wakeup_pipe[0];
+	FD_ZERO(&rset);
+	FD_SET(fd, &rset);
+	timeout.tv_sec = tv_sec;
+	timeout.tv_usec = tv_usec;
+	ret = select(fd + 1, &rset, NULL, NULL, &timeout);
+	if (ret < 0)
+		assert(errno == EINTR);
+	while ((ret = read(fd, buf, sizeof(buf))) > 0)
+		received_signal = buf[ret - 1];
+
+	return received_signal;
 }
 
 static int check_process_uniqueness(struct config_t *conf)
@@ -250,6 +274,18 @@ void pr_cmd(char *target_str, int not_connected)
 		pr_debug("Adding target returned %d\n", ret);
 		close(fd);
 	}
+}
+
+void pr_debug(const char *fmt, ...)
+{
+	va_list args;
+
+	if (!config->debug_verbose)
+		return;
+
+	va_start(args, fmt);
+	vprintf(fmt, args);
+	va_end(args);
 }
 
 void pr_err(const char *fmt, ...)
@@ -635,6 +671,9 @@ static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
 	char *umad_dev_name;
 	int ret;
 
+	*ibdev = NULL;
+	*ibport = NULL;
+
 	umad_dev_name = rindex(umad_dev, '/');
 	if (!umad_dev_name) {
 		pr_err("Couldn't find device name in '%s'\n",
@@ -679,7 +718,12 @@ static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
 	ret = 0;
 
 end:
+	if (ret) {
+		free(*ibport);
+		free(*ibdev);
+	}
 	free(class_dev_path);
+
 	return ret;
 }
 
@@ -1370,10 +1414,13 @@ static char *parse_main_option(struct rule *rule, char *ptr)
 static int parse_other_option(struct rule *rule, char *ptr)
 {
 	static const char *const opt[] = {
+		"allow_ext_sg=",
+		"cmd_sg_entries=",
 		"comp_vector=",
 		"max_cmd_per_lun=",
 		"max_sect=",
 		"queue_size=",
+		"sg_tablesize=",
 		"tl_retry_count=",
 	};
 
@@ -1505,11 +1552,59 @@ out:
 	return ret;
 }
 
+static int set_conf_dev_and_port(char *umad_dev, struct config_t *conf)
+{
+	int ret;
+
+	if (umad_dev) {
+		char *ibport;
+
+		ret = translate_umad_to_ibdev_and_port(umad_dev,
+						       &conf->dev_name,
+						       &ibport);
+		if (ret) {
+			pr_err("Fail to translate umad to ibdev and port\n");
+			goto out;
+		}
+		conf->port_num = atoi(ibport);
+		if (conf->port_num == 0) {
+			pr_err("Bad port number %s\n", ibport);
+			ret = -1;
+		}
+		free(ibport);
+	} else {
+		umad_ca_t ca;
+		umad_port_t port;
+
+		ret = umad_get_ca(NULL, &ca);
+		if (ret) {
+			pr_err("Failed to get default CA\n");
+			goto out;
+		}
+
+		ret = umad_get_port(ca.ca_name, 0, &port);
+		if (ret) {
+			pr_err("Failed to get default port for CA %s\n",
+			       ca.ca_name);
+			umad_release_ca(&ca);
+			goto out;
+		}
+		conf->dev_name = strdup(ca.ca_name);
+		conf->port_num = port.portnum;
+		umad_release_port(&port);
+		umad_release_ca(&ca);
+		pr_debug("Using device %s port %d\n", conf->dev_name,
+			 conf->port_num);
+	}
+out:
+	return ret;
+}
+
+
 static int get_config(struct config_t *conf, int argc, char *argv[])
 {
 	/* set defaults */
-	char* umad_dev   = "/dev/infiniband/umad0";
-	char *ibport;
+	char* umad_dev = NULL;
 	int ret;
 
 	conf->port_num			= 1;
@@ -1628,19 +1723,11 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 	initialize_sysfs();
 
 	if (conf->dev_name == NULL) {
-		if (translate_umad_to_ibdev_and_port(umad_dev, &conf->dev_name, &ibport)) {
-			pr_err(
-				"Fail to translate umad to ibdev and port\n");
-			return -1;
-		}
-		conf->port_num = atoi(ibport);
-		if (conf->port_num == 0) {
-			pr_err("Bad port number %s\n", ibport);
-			free(conf->dev_name);
-			free(ibport);
-			return -1;
-		}
-		free(ibport);
+		ret = set_conf_dev_and_port(umad_dev, conf);
+	        if (ret) {
+	                pr_err("Failed to build config\n");
+	                return ret;
+	        }
 	}
 	ret = asprintf(&conf->add_target_file,
 		       "%s/class/infiniband_srp/srp-%s-%d/add_target", sysfs_path,
@@ -1656,11 +1743,12 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 	return 0;
 }
 
-static void config_destroy(struct config_t *conf)
+static void free_config(struct config_t *conf)
 {
 	free(conf->dev_name);
 	free(conf->add_target_file);
 	free(conf->rules);
+	free(conf);
 }
 
 static void umad_resources_init(struct umad_resources *umad_res)
@@ -1727,7 +1815,8 @@ void *run_thread_retry_to_connect(void *res_in)
 		if (retry_list_is_empty(res->sync_res))
 			pthread_cond_wait(&res->sync_res->retry_cond,
 					  &res->sync_res->retry_mutex);
-		while ((target = pop_from_retry_list(res->sync_res))) {
+		while (!res->sync_res->stop_threads &&
+		       (target = pop_from_retry_list(res->sync_res)) != NULL) {
 			pthread_mutex_unlock(&res->sync_res->retry_mutex);
 			sleep_time = target->retry_time - time(NULL);
 
@@ -1860,8 +1949,7 @@ static void ts_sub(const struct timespec *a, const struct timespec *b,
 
 static int ibsrpdm(int argc, char *argv[])
 {
-	char* umad_dev = "/dev/infiniband/umad0";
-	char* ibport;
+	char* umad_dev = NULL;
 	struct resources *res;
 	int ret;
 
@@ -1872,6 +1960,7 @@ static int ibsrpdm(int argc, char *argv[])
 	config->timeout = 5000;
 	config->mad_retries = 3;
 	config->all = 1;
+	config->once = 1;
 
 	while (1) {
 		int c;
@@ -1901,13 +1990,11 @@ static int ibsrpdm(int argc, char *argv[])
 
 	initialize_sysfs();
 
-	if (translate_umad_to_ibdev_and_port(umad_dev, &config->dev_name,
-					     &ibport)) {
-		pr_err("Fail to translate umad to ibdev and port\n");
+	ret = set_conf_dev_and_port(umad_dev, config);
+	if (ret) {
+		pr_err("Failed to build config\n");
 		return 1;
 	}
-	config->port_num = atoi(ibport);
-	free(ibport);
 
 	umad_init();
 	res = alloc_res();
@@ -1930,7 +2017,7 @@ static int ibsrpdm(int argc, char *argv[])
 umad_done:
 	umad_done();
 
-	free(config);
+	free_config(config);
 
 	return ret;
 }
@@ -1944,8 +2031,9 @@ int main(int argc, char *argv[])
 	ib_gid_t 		gid;
 	struct target_details  *target;
 	struct sigaction	sa;
-	int			subscribed = 0;
-	int			lockfd;
+	int			subscribed;
+	int			lockfd = -1;
+	int			received_signal = 0;
 
 	STATIC_ASSERT(sizeof(struct srp_dm_mad) == 256);
 	STATIC_ASSERT(sizeof(struct srp_dm_rmpp_sa_mad) == 256);
@@ -1962,31 +2050,33 @@ int main(int argc, char *argv[])
 	}
 	for (i = 0; i < 2; i++) {
 		flags = fcntl(wakeup_pipe[i], F_GETFL);
-		fcntl(wakeup_pipe[i], F_SETFL, flags | O_NONBLOCK);
-	}
+		if (flags < 0) {
+			pr_err("fcntl F_GETFL failed for %d\n", wakeup_pipe[i]);
+			goto close_pipe;
+		}
+		if (fcntl(wakeup_pipe[i], F_SETFL, flags | O_NONBLOCK) < 0) {
+			pr_err("fcntl F_SETFL failed for %d\n", wakeup_pipe[i]);
+			goto close_pipe;
+		}
 
-	/*
-	 * signal_handler() may be invoked on the context of any thread.
-	 * Avoid that data race detection tools complain about this.
-	 */
-	ANNOTATE_BENIGN_RACE_SIZED(&received_signal, sizeof(received_signal),
-				   "");
+	}
 
 	memset(&sa, 0, sizeof(sa));
 	sigemptyset(&sa.sa_mask);
 	sa.sa_handler = signal_handler;
 	sigaction(SIGINT, &sa, 0);
 	sigaction(SIGTERM, &sa, 0);
+	sigaction(SRP_CATAS_ERR, &sa, 0);
 
 	if (strcmp(argv[0] + max_t(int, 0, strlen(argv[0]) - strlen("ibsrpdm")),
 		   "ibsrpdm") == 0) {
 		ret = ibsrpdm(argc, argv);
-		goto close_pipe;
+		goto restore_sig;
 	}
 
 	openlog("srp_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
 
-	config = malloc(sizeof(*config));
+	config = calloc(1, sizeof(*config));
 	if (!config) {
  		pr_err("out of memory\n");
 		ret = ENOMEM;
@@ -2001,24 +2091,41 @@ int main(int argc, char *argv[])
 	if (config->verbose)
 		print_config(config);
 
+	if (!config->once) {
+		lockfd = check_process_uniqueness(config);
+		if (lockfd < 0) {
+			ret = EPERM;
+			goto free_config;
+		}
+	}
+
+catas_start:
+	subscribed = 0;
+
 	ret = umad_init();
 	if (ret < 0) {
 		pr_err("umad_init failed\n");
-		goto clean_config;
+		goto close_lockfd;
 	}
 
 	res = alloc_res();
+	if (!res && received_signal == SRP_CATAS_ERR)
+		pr_err("Device has not yet recovered from catas error\n");
 	if (!res)
 		goto clean_umad;
 
-	if (config->once) {
-		ret = recalc(res);
-		goto free_res;
+	/*
+	 * alloc_res() fails while the HCA is recovering from a catastrophic
+	 * error. Clear 'received_signal' after alloc_res() has succeeded to
+	 * finish the alloc_res() retry loop.
+	 */
+	if (received_signal == SRP_CATAS_ERR) {
+		pr_err("Device recovered from catastrophic error\n");
+		received_signal = 0;
 	}
 
-	lockfd = check_process_uniqueness(config);
-	if (lockfd < 0) {
-		ret = EPERM;
+	if (config->once) {
+		ret = recalc(res);
 		goto free_res;
 	}
 
@@ -2038,8 +2145,10 @@ int main(int argc, char *argv[])
 					res->ud_res->ah = NULL;
 				}
 				ret = create_ah(res->ud_res);
-				if (ret)
+				if (ret) {
+					received_signal = get_received_signal(10, 0);
 					goto kill_threads;
+				}
 			}
 
 			if (res->ud_res->ah) {
@@ -2085,9 +2194,6 @@ int main(int argc, char *argv[])
 				}
 			}
 		} else {
-			int fd;
-			fd_set rset;
-			char buf[16];
 			struct timespec now, delta;
 			struct timeval timeout;
 
@@ -2103,14 +2209,10 @@ int main(int argc, char *argv[])
 				timeout.tv_sec = 0;
 				timeout.tv_usec = 0;
 			}
-			fd = wakeup_pipe[0];
-			FD_ZERO(&rset);
-			FD_SET(fd, &rset);
-			ret = select(fd + 1, &rset, NULL, NULL, &timeout);
-			if (ret < 0)
-				assert(errno == EINTR);
-			while (read(fd, buf, sizeof(buf)) > 0)
-				;
+
+			received_signal = get_received_signal(timeout.tv_sec,
+							timeout.tv_usec) ? :
+				received_signal;
 		}
 	}
 
@@ -2124,6 +2226,9 @@ kill_threads:
 	case SIGTERM:
 		pr_err("Got SIGTERM\n");
 		break;
+	case SRP_CATAS_ERR:
+		pr_err("Got SIG SRP_CATAS_ERR\n");
+		break;
 	case 0:
 		break;
 	default:
@@ -2131,24 +2236,42 @@ kill_threads:
 		break;
 	}
 
-	if (subscribed)
-		/* Traps deregistration before exiting */
+	if (subscribed && received_signal != SRP_CATAS_ERR) {
+		pr_err("Deregistering traps ...\n");
 		register_to_traps(res, 0);
-	close(lockfd);
+		pr_err("Finished trap deregistration.\n");
+	}
 free_res:
 	free_res(res);
+	/* Discard the SIGINT triggered by the free_res() implementation. */
+	get_received_signal(0, 0);
 clean_umad:
 	umad_done();
-clean_config:
-	config_destroy(config);
+	if (received_signal == SRP_CATAS_ERR) {
+		/*
+		 * Device got a catastrophic error. Let's wait a grace
+		 * period and try to probe the device by attempting to
+		 * allocate IB resources. Once it recovers, we will
+		 * start all over again.
+		 */
+		received_signal = get_received_signal(10, 0) ? :
+			received_signal;
+		if (received_signal == SRP_CATAS_ERR)
+			goto catas_start;
+	}
+close_lockfd:
+	if (lockfd >= 0)
+		close(lockfd);
 free_config:
-	free(config);
+	free_config(config);
 close_log:
 	closelog();
-close_pipe:
+restore_sig:
 	sa.sa_handler = SIG_DFL;
 	sigaction(SIGINT, &sa, 0);
 	sigaction(SIGTERM, &sa, 0);
+	sigaction(SRP_CATAS_ERR, &sa, 0);
+close_pipe:
 	close(wakeup_pipe[1]);
 	close(wakeup_pipe[0]);
 	wakeup_pipe[0] = -1;

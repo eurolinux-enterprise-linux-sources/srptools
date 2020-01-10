@@ -101,15 +101,15 @@ CONFIG_CLEAN_VPATH_FILES =
 am__installdirs = "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(sbindir)" \
 	"$(DESTDIR)$(man1dir)"
 PROGRAMS = $(sbin_PROGRAMS)
+am__dirstamp = $(am__leading_dot)dirstamp
 am_srp_daemon_srp_daemon_OBJECTS =  \
-	srp_daemon_srp_daemon-srp_daemon.$(OBJEXT) \
-	srp_daemon_srp_daemon-srp_handle_traps.$(OBJEXT) \
-	srp_daemon_srp_daemon-srp_sync.$(OBJEXT)
+	srp_daemon/srp_daemon_srp_daemon-srp_daemon.$(OBJEXT) \
+	srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.$(OBJEXT) \
+	srp_daemon/srp_daemon_srp_daemon-srp_sync.$(OBJEXT)
 srp_daemon_srp_daemon_OBJECTS = $(am_srp_daemon_srp_daemon_OBJECTS)
 srp_daemon_srp_daemon_DEPENDENCIES =
 srp_daemon_srp_daemon_LINK = $(CCLD) $(srp_daemon_srp_daemon_CFLAGS) \
 	$(CFLAGS) $(AM_LDFLAGS) $(LDFLAGS) -o $@
-am__dirstamp = $(am__leading_dot)dirstamp
 am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
 am__vpath_adj = case $$p in \
     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
@@ -320,6 +320,7 @@ sbin_SCRIPTS = \
     srp_daemon/srp_daemon.sh
 
 EXTRA_DIST = \
+    autogen.sh build-deb.sh debian \
     srp_daemon/srp_daemon.h \
     srp_daemon/srp_ib_types.h \
     srp_daemon/srp_daemon.sh \
@@ -432,6 +433,18 @@ clean-sbinPROGRAMS:
 srp_daemon/$(am__dirstamp):
 	@$(MKDIR_P) srp_daemon
 	@: > srp_daemon/$(am__dirstamp)
+srp_daemon/$(DEPDIR)/$(am__dirstamp):
+	@$(MKDIR_P) srp_daemon/$(DEPDIR)
+	@: > srp_daemon/$(DEPDIR)/$(am__dirstamp)
+srp_daemon/srp_daemon_srp_daemon-srp_daemon.$(OBJEXT):  \
+	srp_daemon/$(am__dirstamp) \
+	srp_daemon/$(DEPDIR)/$(am__dirstamp)
+srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.$(OBJEXT):  \
+	srp_daemon/$(am__dirstamp) \
+	srp_daemon/$(DEPDIR)/$(am__dirstamp)
+srp_daemon/srp_daemon_srp_daemon-srp_sync.$(OBJEXT):  \
+	srp_daemon/$(am__dirstamp) \
+	srp_daemon/$(DEPDIR)/$(am__dirstamp)
 
 srp_daemon/srp_daemon$(EXEEXT): $(srp_daemon_srp_daemon_OBJECTS) $(srp_daemon_srp_daemon_DEPENDENCIES) $(EXTRA_srp_daemon_srp_daemon_DEPENDENCIES) srp_daemon/$(am__dirstamp)
 	@rm -f srp_daemon/srp_daemon$(EXEEXT)
@@ -474,69 +487,72 @@ uninstall-sbinSCRIPTS:
 
 mostlyclean-compile:
 	-rm -f *.$(OBJEXT)
+	-rm -f srp_daemon/*.$(OBJEXT)
 
 distclean-compile:
 	-rm -f *.tab.c
 
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po@am__quote@
 
 .c.o:
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/$*.Tpo $(DEPDIR)/$*.Po
+@am__fastdepCC_TRUE@	$(AM_V_CC)depbase=`echo $@ | sed 's|[^/]*$$|$(DEPDIR)/&|;s|\.o$$||'`;\
+@am__fastdepCC_TRUE@	$(COMPILE) -MT $@ -MD -MP -MF $$depbase.Tpo -c -o $@ $< &&\
+@am__fastdepCC_TRUE@	$(am__mv) $$depbase.Tpo $$depbase.Po
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='$<' object='$@' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(COMPILE) -c $<
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(COMPILE) -c -o $@ $<
 
 .c.obj:
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ `$(CYGPATH_W) '$<'`
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/$*.Tpo $(DEPDIR)/$*.Po
+@am__fastdepCC_TRUE@	$(AM_V_CC)depbase=`echo $@ | sed 's|[^/]*$$|$(DEPDIR)/&|;s|\.obj$$||'`;\
+@am__fastdepCC_TRUE@	$(COMPILE) -MT $@ -MD -MP -MF $$depbase.Tpo -c -o $@ `$(CYGPATH_W) '$<'` &&\
+@am__fastdepCC_TRUE@	$(am__mv) $$depbase.Tpo $$depbase.Po
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='$<' object='$@' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(COMPILE) -c `$(CYGPATH_W) '$<'`
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(COMPILE) -c -o $@ `$(CYGPATH_W) '$<'`
 
-srp_daemon_srp_daemon-srp_daemon.o: srp_daemon/srp_daemon.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_daemon.o -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo -c -o srp_daemon_srp_daemon-srp_daemon.o `test -f 'srp_daemon/srp_daemon.c' || echo '$(srcdir)/'`srp_daemon/srp_daemon.c
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_daemon.c' object='srp_daemon_srp_daemon-srp_daemon.o' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_daemon.o: srp_daemon/srp_daemon.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_daemon.o -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_daemon.o `test -f 'srp_daemon/srp_daemon.c' || echo '$(srcdir)/'`srp_daemon/srp_daemon.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_daemon.c' object='srp_daemon/srp_daemon_srp_daemon-srp_daemon.o' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_daemon.o `test -f 'srp_daemon/srp_daemon.c' || echo '$(srcdir)/'`srp_daemon/srp_daemon.c
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_daemon.o `test -f 'srp_daemon/srp_daemon.c' || echo '$(srcdir)/'`srp_daemon/srp_daemon.c
 
-srp_daemon_srp_daemon-srp_daemon.obj: srp_daemon/srp_daemon.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_daemon.obj -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo -c -o srp_daemon_srp_daemon-srp_daemon.obj `if test -f 'srp_daemon/srp_daemon.c'; then $(CYGPATH_W) 'srp_daemon/srp_daemon.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_daemon.c'; fi`
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_daemon.c' object='srp_daemon_srp_daemon-srp_daemon.obj' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_daemon.obj: srp_daemon/srp_daemon.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_daemon.obj -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_daemon.obj `if test -f 'srp_daemon/srp_daemon.c'; then $(CYGPATH_W) 'srp_daemon/srp_daemon.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_daemon.c'; fi`
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_daemon.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_daemon.c' object='srp_daemon/srp_daemon_srp_daemon-srp_daemon.obj' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_daemon.obj `if test -f 'srp_daemon/srp_daemon.c'; then $(CYGPATH_W) 'srp_daemon/srp_daemon.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_daemon.c'; fi`
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_daemon.obj `if test -f 'srp_daemon/srp_daemon.c'; then $(CYGPATH_W) 'srp_daemon/srp_daemon.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_daemon.c'; fi`
 
-srp_daemon_srp_daemon-srp_handle_traps.o: srp_daemon/srp_handle_traps.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_handle_traps.o -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo -c -o srp_daemon_srp_daemon-srp_handle_traps.o `test -f 'srp_daemon/srp_handle_traps.c' || echo '$(srcdir)/'`srp_daemon/srp_handle_traps.c
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_handle_traps.c' object='srp_daemon_srp_daemon-srp_handle_traps.o' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.o: srp_daemon/srp_handle_traps.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.o -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.o `test -f 'srp_daemon/srp_handle_traps.c' || echo '$(srcdir)/'`srp_daemon/srp_handle_traps.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_handle_traps.c' object='srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.o' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_handle_traps.o `test -f 'srp_daemon/srp_handle_traps.c' || echo '$(srcdir)/'`srp_daemon/srp_handle_traps.c
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.o `test -f 'srp_daemon/srp_handle_traps.c' || echo '$(srcdir)/'`srp_daemon/srp_handle_traps.c
 
-srp_daemon_srp_daemon-srp_handle_traps.obj: srp_daemon/srp_handle_traps.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_handle_traps.obj -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo -c -o srp_daemon_srp_daemon-srp_handle_traps.obj `if test -f 'srp_daemon/srp_handle_traps.c'; then $(CYGPATH_W) 'srp_daemon/srp_handle_traps.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_handle_traps.c'; fi`
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_handle_traps.c' object='srp_daemon_srp_daemon-srp_handle_traps.obj' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.obj: srp_daemon/srp_handle_traps.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.obj -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.obj `if test -f 'srp_daemon/srp_handle_traps.c'; then $(CYGPATH_W) 'srp_daemon/srp_handle_traps.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_handle_traps.c'; fi`
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_handle_traps.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_handle_traps.c' object='srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.obj' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_handle_traps.obj `if test -f 'srp_daemon/srp_handle_traps.c'; then $(CYGPATH_W) 'srp_daemon/srp_handle_traps.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_handle_traps.c'; fi`
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_handle_traps.obj `if test -f 'srp_daemon/srp_handle_traps.c'; then $(CYGPATH_W) 'srp_daemon/srp_handle_traps.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_handle_traps.c'; fi`
 
-srp_daemon_srp_daemon-srp_sync.o: srp_daemon/srp_sync.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_sync.o -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo -c -o srp_daemon_srp_daemon-srp_sync.o `test -f 'srp_daemon/srp_sync.c' || echo '$(srcdir)/'`srp_daemon/srp_sync.c
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_sync.c' object='srp_daemon_srp_daemon-srp_sync.o' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_sync.o: srp_daemon/srp_sync.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_sync.o -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_sync.o `test -f 'srp_daemon/srp_sync.c' || echo '$(srcdir)/'`srp_daemon/srp_sync.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_sync.c' object='srp_daemon/srp_daemon_srp_daemon-srp_sync.o' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_sync.o `test -f 'srp_daemon/srp_sync.c' || echo '$(srcdir)/'`srp_daemon/srp_sync.c
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_sync.o `test -f 'srp_daemon/srp_sync.c' || echo '$(srcdir)/'`srp_daemon/srp_sync.c
 
-srp_daemon_srp_daemon-srp_sync.obj: srp_daemon/srp_sync.c
-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon_srp_daemon-srp_sync.obj -MD -MP -MF $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo -c -o srp_daemon_srp_daemon-srp_sync.obj `if test -f 'srp_daemon/srp_sync.c'; then $(CYGPATH_W) 'srp_daemon/srp_sync.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_sync.c'; fi`
-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo $(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po
-@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_sync.c' object='srp_daemon_srp_daemon-srp_sync.obj' libtool=no @AMDEPBACKSLASH@
+srp_daemon/srp_daemon_srp_daemon-srp_sync.obj: srp_daemon/srp_sync.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -MT srp_daemon/srp_daemon_srp_daemon-srp_sync.obj -MD -MP -MF srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo -c -o srp_daemon/srp_daemon_srp_daemon-srp_sync.obj `if test -f 'srp_daemon/srp_sync.c'; then $(CYGPATH_W) 'srp_daemon/srp_sync.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_sync.c'; fi`
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Tpo srp_daemon/$(DEPDIR)/srp_daemon_srp_daemon-srp_sync.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='srp_daemon/srp_sync.c' object='srp_daemon/srp_daemon_srp_daemon-srp_sync.obj' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
-@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon_srp_daemon-srp_sync.obj `if test -f 'srp_daemon/srp_sync.c'; then $(CYGPATH_W) 'srp_daemon/srp_sync.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_sync.c'; fi`
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(srp_daemon_srp_daemon_CFLAGS) $(CFLAGS) -c -o srp_daemon/srp_daemon_srp_daemon-srp_sync.obj `if test -f 'srp_daemon/srp_sync.c'; then $(CYGPATH_W) 'srp_daemon/srp_sync.c'; else $(CYGPATH_W) '$(srcdir)/srp_daemon/srp_sync.c'; fi`
 install-man1: $(man_MANS)
 	@$(NORMAL_INSTALL)
 	@list1=''; \
@@ -832,6 +848,7 @@ clean-generic:
 distclean-generic:
 	-test -z "$(CONFIG_CLEAN_FILES)" || rm -f $(CONFIG_CLEAN_FILES)
 	-test . = "$(srcdir)" || test -z "$(CONFIG_CLEAN_VPATH_FILES)" || rm -f $(CONFIG_CLEAN_VPATH_FILES)
+	-rm -f srp_daemon/$(DEPDIR)/$(am__dirstamp)
 	-rm -f srp_daemon/$(am__dirstamp)
 
 maintainer-clean-generic:
@@ -843,7 +860,7 @@ clean-am: clean-generic clean-sbinPROGRAMS mostlyclean-am
 
 distclean: distclean-am
 	-rm -f $(am__CONFIG_DISTCLEAN_FILES)
-	-rm -rf ./$(DEPDIR)
+	-rm -rf srp_daemon/$(DEPDIR)
 	-rm -f Makefile
 distclean-am: clean-am distclean-compile distclean-generic \
 	distclean-hdr distclean-tags
@@ -893,7 +910,7 @@ installcheck-am:
 maintainer-clean: maintainer-clean-am
 	-rm -f $(am__CONFIG_DISTCLEAN_FILES)
 	-rm -rf $(top_srcdir)/autom4te.cache
-	-rm -rf ./$(DEPDIR)
+	-rm -rf srp_daemon/$(DEPDIR)
 	-rm -f Makefile
 maintainer-clean-am: distclean-am maintainer-clean-generic
 

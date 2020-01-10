@@ -1,11 +1,11 @@
 Name: srptools
-Version: 1.0.2
-Release: 1%{?dist}
+Version: 1.0.3
+Release: 2%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
 License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
-Source0: http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}.tar.gz
+Source0: https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}.tar.gz
 Source1: srptools.init
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: libibumad-devel, libibverbs-devel > 1.1.3
@@ -60,6 +60,17 @@ fi
 %doc README NEWS ChangeLog COPYING
 
 %changelog
+* Fri Jan 29 2016 Honggang Li <honli@redhat.com> - 1.0.3-2
+- Adjust startup/shutdown priority to start srpd before netfs service
+- connect remote srp targets before start srpd
+- clean up status actions
+- Resolves: bz1233016
+
+* Wed Dec 30 2015 Honggang Li <honli@redhat.com> - 1.0.3-1
+- Update to upstream v1.0.3
+- Update source URL
+- Resolves: bz1271446
+
 * Wed Jun 18 2014 Doug Ledford <dledford@redhat.com> - 1.0.2-1
 - Update to latest upstream release
 - Resolves: bz1055654

@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# Bring up/down the SRP client daemon
+# srpd		Bring up/down the SRP client daemon
 #
-# chkconfig: - 25 75
+# chkconfig: - 24 76
 # description: Starts/Stops InfiniBand SRP client service
 # config:	/etc/srp_daemon.conf
 #
@@ -21,7 +21,6 @@
 #	remote devices.
 ### END INIT INFO
 
-CONFIG=/etc/srp_daemon.conf
 RDMA_CONFIG=/etc/rdma/rdma.conf
 pidfile=/var/run/srp_daemon.sh.pid
 subsys=/var/lock/subsys/srpd
@@ -45,6 +44,7 @@ start()
     fi
 
     echo -n "Starting SRP daemon service:"
+    srp_daemon -o -e 2>&1 1>/dev/null
 
     daemon $prog >/dev/null 2>&1 &
     sleep 1
@@ -66,18 +66,12 @@ stop()
     return $RC
 }
 
-status()
-{
-    if [ ! -f $subsys -a ! -f $pidfile ]; then
-    	return 3
-    fi
-    if [ -f $pidfile ]; then
-	checkpid `cat $pidfile`
-	return $?
-    fi
-    if [ -f $subsys ]; then
-	return 2
-    fi
+rh_status() {
+    status $prog
+}
+
+rh_status_q() {
+    rh_status >/dev/null 2>&1
 }
 
 restart ()
@@ -86,34 +80,31 @@ restart ()
     start
 }
 
-condrestart ()
-{
-    [ -e $subsys ] && restart || return 0
-}
-
-usage ()
-{
-    echo
-    echo "Usage: `basename $0` {start|stop|restart|condrestart|try-restart|force-reload|status}"
-    echo
-    return 2
-}
-
-case $1 in
-    start|stop|restart|condrestart|try-restart|force-reload)
-	[ `id -u` != "0" ] && exit 4 ;;
+case "$1" in
+    start)
+        rh_status_q && exit 0
+        start
+    ;;
+    stop)
+        rh_status_q || exit 0
+        stop
+    ;;
+    restart)
+        restart
+    ;;
+    condrestart | try-restart)
+        rh_status_q || exit 0
+        restart
+    ;;
+    force-reload)
+        restart
+    ;;
+    status)
+        rh_status
+    ;;
+    *)
+        echo $"Usage: $0 {start|stop|restart|condrestart|try-restart|force-reload|status}"
+        exit 2
 esac
 
-case $1 in
-    start) start; RC=$? ;;
-    stop) stop; RC=$? ;;
-    restart) restart; RC=$? ;;
-    reload) RC=3 ;;
-    condrestart) condrestart; RC=$? ;;
-    try-restart) condrestart; RC=$? ;;
-    force-reload) condrestart; RC=$? ;;
-    status) status; RC=$? ;;
-    *) usage; RC=$? ;;
-esac
-
-exit $RC
+exit $?
