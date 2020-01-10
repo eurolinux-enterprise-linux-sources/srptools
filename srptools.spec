@@ -1,6 +1,6 @@
 Name: srptools
 Version: 0.0.4
-Release: 9%{?dist}
+Release: 10%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
 License: GPLv2 or BSD
@@ -8,8 +8,8 @@ Url: http://www.openfabrics.org/
 Source0: http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.1.gce1f64c.tar.gz
 Source1: srptools.init
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
-BuildRequires: libibumad-devel, libibverbs-devel >= 1.1.2-4
-ExclusiveArch: i386 x86_64 ia64 ppc ppc64
+BuildRequires: libibumad-devel, libibverbs-devel > 1.1.3
+ExclusiveArch: %{ix86} x86_64 ia64 ppc ppc64
 Obsoletes: openib-srptools <= 0.0.6
 
 %description
@@ -44,6 +44,10 @@ rm -rf %{buildroot}
 %doc README NEWS ChangeLog COPYING
 
 %changelog
+* Wed Jul 27 2011 Doug Ledford <dledford@redhat.com> - 0.0.4-10.el6
+- Fix build on i686 arch
+- Resolves: bz724900
+
 * Thu Feb 03 2011 Doug Ledford <dledford@redhat.com> - 0.0.4-9.el6
 - Add srpd init script
 - Resolves: bz591169, bz658633, bz658674
