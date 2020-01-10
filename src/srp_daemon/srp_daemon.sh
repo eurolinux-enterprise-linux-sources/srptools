@@ -28,12 +28,12 @@
 #  $Id$
 #
 
+shopt -s nullglob
 
-prog=run_srp_daemon
+prog=/usr/sbin/srp_daemon
 params=$@
 ibdir="/sys/class/infiniband"
-log="/var/log/srp_daemon.log"
-retries=60
+rescan_interval=60
 pids=""
 pidfile=/var/run/srp_daemon.sh.pid
 mypid=$$
@@ -42,59 +42,27 @@ trap_handler()
 {
     if [ -n "$pids" ]; then
         kill -15 $pids > /dev/null 2>&1
+        wait $pids
     fi
     logger -i -t "$(basename $0)" "killing $prog."
     /bin/rm -f $pidfile
     exit 0
 }
 
-rotate_log()
-{
-        local log=$1
-        if [ -s ${log} ]; then
-                cat ${log} >> ${log}.$(date +%Y-%m-%d)
-                /bin/rm -f ${log}
-        fi
-        touch ${log}
-}
-
-# Check if there is another copy of running srp_daemon.sh
-if [ -s $pidfile ]; then
-    read line < $pidfile
-    for p in $line
-    do
-        if [ -z "${p//[0-9]/}" -a -d "/proc/$p" ]; then
-            if [ "$p" != "$mypid" ]; then
-                echo "$(basename $0) is already running. Exiting."
-                exit 1
-            fi
-        else
-            # pid file exist but no process running
-            echo $mypid > $pidfile 
-        fi
-    done
-else
-    echo $mypid > $pidfile 
+# Check if there is another copy running of srp_daemon.sh
+if [ -f $pidfile ]; then
+    if [ -e /proc/$(cat $pidfile 2>/dev/null)/status ]; then
+        echo "$(basename $0) is already running. Exiting."
+        exit 1
+    else
+        /bin/rm -f $pidfile
+    fi
 fi
 
-# Check once more to prevent race condition
-if [ -s $pidfile ]; then
-    read line < $pidfile
-    for p in $line
-    do
-        if [ -z "${p//[0-9]/}" -a -d "/proc/$p" ]; then
-            if [ "$p" != "$mypid" ]; then
-                echo "$(basename $0) is already running. Race detected. Exiting."
-                exit 1
-            fi
-        fi
-    done
-else
-    echo "Failed to create $pidfile. Exiting."
+if ! echo $mypid > $pidfile; then
+    echo "Creating $pidfile for pid $mypid failed"
     exit 1
 fi
-
-rotate_log ${log}
 
 trap 'trap_handler' 2 15
 
@@ -103,14 +71,14 @@ do
     sleep 30
 done
 
-
-for hca_id in `/bin/ls -1 ${ibdir}`
-do
-    for port in `/bin/ls -1 ${ibdir}/${hca_id}/ports/`
-    do
-        ${prog} -e -c -n -i ${hca_id} -p ${port} -R ${retries} ${params}&
+for d in ${ibdir}_mad/umad*; do
+    hca_id="$(<$d/ibdev)"
+    port="$(<$d/port)"
+    add_target="${ibdir}_srp/srp-${hca_id}-${port}/add_target"
+    if [ -e "${add_target}" ]; then
+        ${prog} -e -c -n -i ${hca_id} -p ${port} -R ${rescan_interval} ${params} >/dev/null 2>&1 &
         pids="$pids $!"
-    done
+    fi
 done
 
 wait

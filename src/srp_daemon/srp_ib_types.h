@@ -38,6 +38,14 @@
 
 #include <netinet/in.h>
 
+#define SRP_INFORMINFO_LID_COMP		(1 << 1)
+#define SRP_INFORMINFO_ISGENERIC_COMP	(1 << 4)
+#define SRP_INFORMINFO_SUBSCRIBE_COMP	(1 << 5)
+#define SRP_INFORMINFO_TRAPTYPE_COMP	(1 << 6)
+#define SRP_INFORMINFO_TRAPNUM_COMP	(1 << 7)
+#define SRP_INFORMINFO_QPN_COMP		(1 << 8)
+#define SRP_INFORMINFO_PRODUCER_COMP	(1 << 12)
+
 #ifndef PACK_SUFFIX
 #define PACK_SUFFIX __attribute__((packed))
 #endif
@@ -186,7 +194,7 @@ typedef struct _ib_path_rec
 	ib_net16_t				slid;
 	ib_net32_t				hop_flow_raw;
 	uint8_t					tclass;
-	uint8_t					num_path; 
+	uint8_t					num_path;
 	ib_net16_t				pkey;
 	ib_net16_t				sl;
 	uint8_t					mtu;
@@ -271,7 +279,7 @@ typedef struct _ib_inform_info
 		uint8_t			node_type_msb;
 		ib_net16_t		node_type_lsb;
 	 } PACK_SUFFIX generic;
-	 
+
 	 struct _inform_vend
 	 {
 		ib_net16_t		dev_id;
@@ -280,15 +288,15 @@ typedef struct _ib_inform_info
 		uint8_t			vendor_id_msb;
 		ib_net16_t		vendor_id_lsb;
 	 } PACK_SUFFIX vend;
-	 
+
   }	PACK_SUFFIX g_or_v;
-  
+
 }	PACK_SUFFIX ib_inform_info_t;
 
 typedef struct _ib_mad_notice_attr    // Total Size calc  Accumulated
 {
   uint8_t				generic_type;    // 1                1
-  
+
   union _notice_g_or_v
   {
 	 struct _notice_generic            // 5                6
@@ -297,7 +305,7 @@ typedef struct _ib_mad_notice_attr    // Total Size calc  Accumulated
 		ib_net16_t	prod_type_lsb;
 		ib_net16_t	trap_num;
 	 }	PACK_SUFFIX generic;
-	 
+
 	 struct _notice_vend
 	 {
 		uint8_t		vend_id_msb;
@@ -305,10 +313,10 @@ typedef struct _ib_mad_notice_attr    // Total Size calc  Accumulated
 		ib_net16_t	dev_id;
 	 }	PACK_SUFFIX vend;
   } g_or_v;
-  
+
   ib_net16_t			issuer_lid;    // 2                 8
   ib_net16_t			toggle_count;  // 2                 10
-  
+
   union _data_details               // 54                64
 	{
 	  struct _raw_data
@@ -325,13 +333,13 @@ typedef struct _ib_mad_notice_attr    // Total Size calc  Accumulated
 	  struct _ntc_128 {
 		 ib_net16_t sw_lid; // the sw lid of which link state changed
 	  } PACK_SUFFIX ntc_128;
-	  
+
 	  struct _ntc_129_131 {
 		 ib_net16_t    pad;
 		 ib_net16_t    lid;		// lid and port number of the violation
 		 uint8_t     port_num;
 	  } PACK_SUFFIX ntc_129_131;
-	  
+
 	  struct _ntc_144 {
 		 ib_net16_t    pad1;
 		 ib_net16_t    lid;		// lid where capability mask changed
