@@ -1,6 +1,6 @@
 Name: srptools
 Version: 0.0.4
-Release: 10%{?dist}
+Release: 15%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
 License: GPLv2 or BSD
@@ -9,6 +9,8 @@ Source0: http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.1.gce
 Source1: srptools.init
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: libibumad-devel, libibverbs-devel > 1.1.3
+Requires(post): chkconfig
+Requires(preun): chkconfig
 ExclusiveArch: %{ix86} x86_64 ia64 ppc ppc64
 Obsoletes: openib-srptools <= 0.0.6
 
@@ -31,6 +33,16 @@ install -p -m 755 -D %{SOURCE1} %{buildroot}%{_initrddir}/srpd
 %clean
 rm -rf %{buildroot}
 
+%post
+if [ $1 = 1 ]; then
+    /sbin/chkconfig --add srpd
+fi
+
+%preun
+if [ $1 = 0 ]; then
+    /sbin/chkconfig --del srpd
+fi
+
 %files
 %defattr(-,root,root)
 %config(noreplace) %{_sysconfdir}/srp_daemon.conf
@@ -44,6 +56,29 @@ rm -rf %{buildroot}
 %doc README NEWS ChangeLog COPYING
 
 %changelog
+* Tue May 01 2012 Doug Ledford <dledford@redhat.com> - 0.0.4-15.el6
+- Another fix to init script
+- Resolves: bz817194
+
+* Fri Apr 27 2012 Doug Ledford <dledford@redhat.com> - 0.0.4-14.el6
+- Fix for fix to init script
+- Related: bz816087
+
+* Thu Apr 26 2012 Doug Ledford <dledford@redhat.com> - 0.0.4-13.el6
+- Need to background the srp_daemon.sh script in our init script, as
+  srp_daemon.sh doesn't return until killed
+- Resolves: bz816087
+
+* Tue Apr 24 2012 Doug Ledford <dledford@redhat.com> - 0.0.4-12.el6
+- Can't use %%{name} macro in the %%post and %%preun as the service
+  name is srpd while the package name is srptools
+- Related: bz815215
+
+* Mon Apr 23 2012 Doug Ledford <dledford@redhat.com> - 0.0.4-11.el6
+- Add the init script even though it isn't enabled by default
+- Fix the init script's usage of srp_daemon.conf
+- Resolves: bz815215, bz815234
+
 * Wed Jul 27 2011 Doug Ledford <dledford@redhat.com> - 0.0.4-10.el6
 - Fix build on i686 arch
 - Resolves: bz724900
