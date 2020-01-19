@@ -6,12 +6,12 @@ Conflicts=emergency.target emergency.service
 Requires=rdma.service
 Wants=opensm.service
 After=rdma.service opensm.service
-After=network.target remote-fs-pre.target
-Before=remote-fs.target
+After=network.target
+Before=remote-fs-pre.target
 
 [Service]
 Type=simple
 ExecStart=/usr/sbin/srp_daemon.sh
 
 [Install]
-WantedBy=remote-fs.target
+WantedBy=remote-fs-pre.target

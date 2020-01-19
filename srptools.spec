@@ -1,5 +1,7 @@
+%define _hardened_build 1
+
 Name: srptools
-Version: 1.0.2
+Version: 1.0.3
 Release: 1%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
@@ -9,7 +11,9 @@ Url: https://www.openfabrics.org/
 Source0: https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}.tar.gz
 Source1: srptools.init
 Source2: srptools.service
-BuildRequires: libibumad-devel, libibverbs-devel > 1.1.3, systemd
+BuildRequires: libibumad-devel
+BuildRequires: libibverbs-devel >= 1.2.0
+BuildRequires: systemd
 Requires(pre): systemd
 Requires(preun): systemd
 Requires(postun): systemd
@@ -40,7 +44,7 @@ make CFLAGS="$CXXFLAGS -fno-strict-aliasing" %{?_smp_mflags}
 make DESTDIR=%{buildroot} install
 rm -f %{buildroot}/etc/init.d/srpd
 install -p -m 755 -D %{SOURCE1} %{buildroot}%{_initrddir}/srpd
-install -p -m 755 -D %{SOURCE2} %{buildroot}%{_unitdir}/srpd.service
+install -p -m 644 -D %{SOURCE2} %{buildroot}%{_unitdir}/srpd.service
 
 %post
 %systemd_post srpd.service
@@ -49,7 +53,7 @@ install -p -m 755 -D %{SOURCE2} %{buildroot}%{_unitdir}/srpd.service
 %systemd_preun srpd.service
 
 %postun
-%systemd_postun
+%systemd_postun_with_restart srpd.service
 
 %post sysv
 if [ $1 = 1 ]; then
@@ -63,7 +67,6 @@ if [ $1 = 0 ]; then
 fi
 
 %files
-%defattr(-,root,root)
 %config(noreplace) %{_sysconfdir}/srp_daemon.conf
 %config(noreplace) %{_sysconfdir}/logrotate.d/srp_daemon
 %config(noreplace) %{_sysconfdir}/rsyslog.d/srp_daemon.conf
@@ -74,13 +77,19 @@ fi
 %{_sbindir}/run_srp_daemon
 %{_mandir}/man1/ibsrpdm.1*
 %{_mandir}/man1/srp_daemon.1*
-%doc README NEWS ChangeLog COPYING
+%doc README NEWS ChangeLog
+%license COPYING
 
 %files sysv
-%defattr(-,root,root)
 %{_initrddir}/srpd
 
 %changelog
+* Tue Apr 12 2016 Honggang Li <honli@redhat.com> - 1.0.3-1
+- Update to latest upstream version 1.0.3.
+- Remove executable permission bits of srpd.service.
+- Start srpd.service before remote-fs service.
+- Resolves: bz1092530, bz1273181, bz1274119
+
 * Fri Jul 17 2015 Doug Ledford <dledford@redhat.com> - 1.0.2-1
 - Update to latest upstream release
 - Resolves: bz1061931

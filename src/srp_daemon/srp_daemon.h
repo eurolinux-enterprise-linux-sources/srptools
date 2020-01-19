@@ -37,6 +37,7 @@
 #define SRP_DM_H
 
 #include <stdint.h>
+#include <signal.h>
 #include <endian.h>
 #include <byteswap.h>
 #include <infiniband/verbs.h>
@@ -75,6 +76,7 @@ template <bool b> struct vki_static_assert { int m_bitfield:(2*b-1); };
 	 ((a)->tv_nsec CMP (b)->tv_nsec) :	\
 	 ((a)->tv_sec CMP (b)->tv_sec))
 
+#define SRP_CATAS_ERR SIGUSR1
 
 enum {
 	SRP_MGMT_CLASS_SA = 3,
@@ -419,12 +421,7 @@ typedef struct {
 			printf(arg);			\
 	} while (0)
 
-#define pr_debug(arg...)		       	\
-	do {				       	\
-		if (config->debug_verbose)	\
-			printf(arg);		\
-	} while (0)
-
+void pr_debug(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void pr_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 int pkey_index_to_pkey(struct umad_resources *umad_res, int pkey_index,
@@ -455,7 +452,7 @@ int sync_resources_init(struct sync_resources *res);
 void sync_resources_cleanup(struct sync_resources *res);
 int modify_qp_to_err(struct ibv_qp *qp);
 void srp_sleep(time_t sec, time_t usec);
-void wake_up_main_loop(void);
+void wake_up_main_loop(char ch);
 void __schedule_rescan(struct sync_resources *res, int when);
 void schedule_rescan(struct sync_resources *res, int when);
 int __rescan_scheduled(struct sync_resources *res);
