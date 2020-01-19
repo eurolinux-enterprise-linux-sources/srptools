@@ -1,6 +1,6 @@
 Name: srptools
 Version: 0.0.4
-Release: 17%{?dist}
+Release: 18%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
 License: GPLv2 or BSD
@@ -78,6 +78,9 @@ fi
 %{_initrddir}/srpd
 
 %changelog
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 0.0.4-18
+- Mass rebuild 2013-12-27
+
 * Fri Feb 15 2013 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 0.0.4-17
 - Rebuilt for https://fedoraproject.org/wiki/Fedora_19_Mass_Rebuild
 
