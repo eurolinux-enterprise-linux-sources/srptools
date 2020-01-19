@@ -40,7 +40,9 @@
 #include <endian.h>
 #include <byteswap.h>
 #include <infiniband/verbs.h>
+#include <infiniband/umad.h>
 
+#include "config.h"
 #include "srp_ib_types.h"
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -58,6 +60,21 @@
 #define ntohll(x) (x)
 #endif
 #endif
+
+#ifdef __cplusplus
+template <bool b> struct vki_static_assert { int m_bitfield:(2*b-1); };
+#define STATIC_ASSERT(expr) \
+	(void)(sizeof(vki_static_assert<(expr)>) - sizeof(int))
+#else
+#define STATIC_ASSERT(expr) (void)(sizeof(struct { int:-!(expr); }))
+#endif
+
+/* a CMP b. See also the BSD macro timercmp(). */
+#define ts_cmp(a, b, CMP)			\
+	(((a)->tv_sec == (b)->tv_sec) ?		\
+	 ((a)->tv_nsec CMP (b)->tv_nsec) :	\
+	 ((a)->tv_sec CMP (b)->tv_sec))
+
 
 enum {
 	SRP_MGMT_CLASS_SA = 3,
@@ -156,12 +173,12 @@ struct srp_dm_rmpp_sa_mad {
 	uint8_t		rmpp_status;
 	uint32_t	seg_num;
 	uint32_t	paylen_newwin;
-	uint64_t	sm_key;
+	uint64_t	sm_key __attribute__((packed));
 	uint16_t	attr_offset;
 	uint16_t	reserved3;
 	uint64_t	comp_mask;
 	uint8_t		data[200];
-} __attribute__((packed));
+};
 
 struct srp_sa_node_rec {
 	uint16_t	lid;
@@ -170,9 +187,9 @@ struct srp_sa_node_rec {
 	uint8_t		class_version;
 	uint8_t		type;
 	uint8_t		num_ports;
-	uint64_t	sys_guid;
-	uint64_t	node_guid;
-	uint64_t	port_guid;
+	uint64_t	sys_guid __attribute__((packed));
+	uint64_t	node_guid __attribute__((packed));
+	uint64_t	port_guid __attribute__((packed));
 	uint16_t	partition_cap;
 	uint16_t	device_id;
 	uint32_t	revision;
@@ -184,11 +201,11 @@ struct srp_sa_port_info_rec {
 	uint16_t	endport_lid;
 	uint8_t		port_num;
 	uint8_t		reserved;
-	uint64_t	m_key;
-	uint64_t	subnet_prefix;
+	uint64_t	m_key __attribute__((packed));
+	uint64_t	subnet_prefix __attribute__((packed));
 	uint16_t	base_lid;
 	uint16_t	master_sm_base_lid;
-	uint32_t	capability_mask;
+	uint32_t	capability_mask __attribute__((packed));
 	uint16_t	diag_code;
 	uint16_t	m_key_lease_period;
 	uint8_t		local_port_num;
@@ -214,13 +231,6 @@ struct srp_sa_port_info_rec {
 	uint8_t		subnet_timeout;
 	uint8_t		resp_time_value;
 	uint8_t		error_threshold;
-} __attribute__((packed));
-
-struct srp_sa_guid_info_rec {
-	uint16_t	lid;
-	uint8_t		block_num;
-	uint8_t		reserverd[5];
-	uint64_t	guid[8];
 };
 
 struct srp_class_port_info {
@@ -294,12 +304,14 @@ enum {
 
 struct rule {
 	int allow;
-	char id_ext[17], ioc_guid[17], dgid[33], service_id[17], options[128];
+	char id_ext[17], ioc_guid[17], dgid[33], service_id[17], pkey[10], options[128];
 };
 
+#define  SRP_MAX_SHARED_PKEYS 127
 #define  MAX_ID_EXT_STRING_LENGTH 17
 
 struct target_details {
+	uint16_t                pkey;
 	char 			id_ext[MAX_ID_EXT_STRING_LENGTH];
 	struct 			srp_dm_ioc_prof ioc_prof;
 	uint64_t	 	subnet_prefix;
@@ -328,6 +340,7 @@ struct config_t {
 	char	       *rules_file;
 	struct rule    *rules;
 	int 		retry_timeout;
+	int		tl_retry_count;
 };
 
 extern struct config_t *config;
@@ -356,7 +369,7 @@ struct umad_resources {
 	int		agent;
 	char	       *port_sysfs_path;
 	uint16_t	sm_lid;
-};	
+};
 
 enum {
 	SIZE_OF_TASKS_LIST = 5,
@@ -364,15 +377,14 @@ enum {
 
 struct sync_resources {
 	int stop_threads;
-	int recalc;
 	int next_task;
-	time_t next_recalc_time;
+	struct timespec next_recalc_time;
 	struct {
 		uint16_t lid;
+		uint16_t pkey;
 		ib_gid_t gid;
 	} tasks[SIZE_OF_TASKS_LIST];
 	pthread_mutex_t mutex;
-	pthread_cond_t cond;
 	struct target_details *retry_tasks_head;
 	struct target_details *retry_tasks_tail;
 	pthread_mutex_t retry_mutex;
@@ -382,10 +394,24 @@ struct sync_resources {
 struct resources {
 	struct ud_resources   *ud_res;
 	struct umad_resources *umad_res;
-	struct sync_resources *sync_res;  
+	struct sync_resources *sync_res;
+	pthread_t trap_thread;
+	pthread_t async_ev_thread;
+	pthread_t reconnect_thread;
+	pthread_t timer_thread;
 };
 
-static const int   node_table_response_size = 1 << 18;
+typedef struct {
+	struct ib_user_mad hdr;
+	char filler[MAD_BLOCK_SIZE];
+} srp_ib_user_mad_t;
+
+#if defined(HAVE_VALGRIND_DRD_H) && defined(ENABLE_VALGRIND)
+#include <valgrind/drd.h>
+#endif
+#ifndef ANNOTATE_BENIGN_RACE_SIZED
+#define ANNOTATE_BENIGN_RACE_SIZED(a, b, c) do { } while(0)
+#endif
 
 #define pr_human(arg...)				\
 	do {						\
@@ -399,42 +425,40 @@ static const int   node_table_response_size = 1 << 18;
 			printf(arg);		\
 	} while (0)
 
-#define pr_err(arg...) 							\
-	do {								\
-		char str[1000];						\
-		time_t tt = time(NULL);					\
-		struct tm *t = localtime(&tt);				\
-		sprintf(str, arg);					\
-		fprintf(stderr, "%02d/%02d/%02d %02d:%02d:%02d : %s", 	\
-			t->tm_mday, t->tm_mon, t->tm_year%100, 		\
-			t->tm_hour, t->tm_min, t->tm_sec, str);		\
-	} while (0)
+void pr_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-
-int get_lid(struct umad_resources *umad_res, ib_gid_t *gid, uint16_t *lid);
-void handle_port(struct resources *res, uint16_t lid, uint64_t h_guid);
+int pkey_index_to_pkey(struct umad_resources *umad_res, int pkey_index,
+		       uint16_t *pkey);
+void handle_port(struct resources *res, uint16_t pkey, uint16_t lid, uint64_t h_guid);
 void ud_resources_init(struct ud_resources *res);
 int ud_resources_create(struct ud_resources *res);
 int ud_resources_destroy(struct ud_resources *res);
 int wait_for_recalc(struct resources *res_in);
-int recalc(struct resources *res);
 int trap_main(struct resources *res);
 void *run_thread_get_trap_notices(void *res_in);
 void *run_thread_listen_to_events(void *res_in);
-void *run_thread_wait_till_timeout(void *res_in);
 int get_node(struct umad_resources *umad_res, uint16_t dlid, uint64_t *guid);
 int create_trap_resources(struct ud_resources *ud_res);
-int register_to_traps(struct ud_resources *ud_res);
+int register_to_traps(struct resources *res, int subscribe);
+uint16_t get_port_lid(struct ibv_context *ib_ctx, int port_num);
 int create_ah(struct ud_resources *ud_res);
-void push_gid_to_list(struct sync_resources *res, ib_gid_t *gid);
-void push_lid_to_list(struct sync_resources *res, uint16_t lid);
+void push_gid_to_list(struct sync_resources *res, ib_gid_t *gid, uint16_t pkey);
+void push_lid_to_list(struct sync_resources *res, uint16_t lid, uint16_t pkey);
 struct target_details *pop_from_retry_list(struct sync_resources *res);
 void push_to_retry_list(struct sync_resources *res,
 			struct target_details *target);
 int retry_list_is_empty(struct sync_resources *res);
 void clear_traps_list(struct sync_resources *res);
-int pop_from_list(struct sync_resources *res, uint16_t *lid, ib_gid_t *gid);
+int pop_from_list(struct sync_resources *res, uint16_t *lid, ib_gid_t *gid,
+		  uint16_t *pkey);
 int sync_resources_init(struct sync_resources *res);
+void sync_resources_cleanup(struct sync_resources *res);
+int modify_qp_to_err(struct ibv_qp *qp);
 void srp_sleep(time_t sec, time_t usec);
+void wake_up_main_loop(void);
+void __schedule_rescan(struct sync_resources *res, int when);
+void schedule_rescan(struct sync_resources *res, int when);
+int __rescan_scheduled(struct sync_resources *res);
+int rescan_scheduled(struct sync_resources *res);
 
 #endif /* SRP_DM_H */

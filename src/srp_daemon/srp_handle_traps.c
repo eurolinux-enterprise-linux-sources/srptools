@@ -30,8 +30,9 @@
  * SOFTWARE.
  *
  * $Author: ishai Rabinovitz [ishai@mellanox.co.il]$
- * 
+ *
  */
+#include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -50,7 +51,6 @@
 
 void srp_sleep(time_t sec, time_t usec)
 {
-	int nanosleep(const struct timespec *req, struct timespec *rem);
 	struct timespec req, rem;
 
 	if (usec > 1000) {
@@ -60,17 +60,13 @@ void srp_sleep(time_t sec, time_t usec)
 	req.tv_sec = sec;
 	req.tv_nsec = usec * 1000000;
 
-	while (nanosleep(&req, &rem) < 0) {
-		if (errno != EINTR)
-			return;
-		req = rem;
-	}
+	nanosleep(&req, &rem);
 }
 
 /*****************************************************************************
 * Function: ud_resources_init
 *****************************************************************************/
-void 
+void
 ud_resources_init(struct ud_resources *res)
 {
 	res->dev_list = NULL;
@@ -91,11 +87,11 @@ ud_resources_init(struct ud_resources *res)
 * Function: modify_qp_to_rts
 *****************************************************************************/
 static int modify_qp_to_rts(struct ibv_qp *qp)
-{	
+{
 	struct ibv_qp_attr attr;
 	int flags;
 	int rc;
-	
+
 	/* RESET -> INIT */
 	memset(&attr, 0, sizeof(struct ibv_qp_attr));
 
@@ -114,9 +110,9 @@ static int modify_qp_to_rts(struct ibv_qp *qp)
 
 	/* INIT -> RTR */
 	memset(&attr, 0, sizeof(attr));
-	
+
 	attr.qp_state = IBV_QPS_RTR;
- 
+
 	flags = IBV_QP_STATE;
 
 	rc = ibv_modify_qp(qp, &attr, flags);
@@ -127,10 +123,10 @@ static int modify_qp_to_rts(struct ibv_qp *qp)
 
 	/* RTR -> RTS */
 	/* memset(&attr, 0, sizeof(attr)); */
-	
+
 	attr.qp_state = IBV_QPS_RTS;
 	attr.sq_psn = 0;
-	
+
 	flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
 
 	rc = ibv_modify_qp(qp, &attr, flags);
@@ -138,9 +134,18 @@ static int modify_qp_to_rts(struct ibv_qp *qp)
 		pr_err("failed to modify QP state to RTS\n");
 		return rc;
 	}
-	
+
 	return 0;
-}	
+}
+
+int modify_qp_to_err(struct ibv_qp *qp)
+{
+	static struct ibv_qp_attr attr = {
+		.qp_state = IBV_QPS_ERR,
+	};
+
+	return ibv_modify_qp(qp, &attr, IBV_QP_STATE);
+}
 
 /*****************************************************************************
 * Function: fill_rq_entry
@@ -158,18 +163,18 @@ static int fill_rq_entry(struct ud_resources *res, int cur_receive)
 	if (first) {
 		first = 0;
 		memset(&rr, 0, sizeof(rr));
-	
+
 		sg.length = RECV_BUF_SIZE;
 		sg.lkey = res->mr->lkey;
-		
+
 		rr.next = NULL;
 		rr.sg_list = &sg;
 		rr.num_sge = 1;
 	}
-	
+
 	sg.addr = (((unsigned long)res->recv_buf) + RECV_BUF_SIZE * cur_receive);
 	rr.wr_id = cur_receive;
-	
+
 	ret = ibv_post_recv(res->qp, &rr, bad_wr);
 	if (ret < 0) {
 		pr_err("failed to post RR\n");
@@ -177,7 +182,7 @@ static int fill_rq_entry(struct ud_resources *res, int cur_receive)
 	}
 	return 0;
 }
-	
+
 /*****************************************************************************
 * Function: fill_rq
 *****************************************************************************/
@@ -186,7 +191,7 @@ static int fill_rq(struct ud_resources *res)
 	int cur_receive;
 	int ret;
 
-	for (cur_receive=0; cur_receive<config->num_of_oust; ++cur_receive) {	
+	for (cur_receive=0; cur_receive<config->num_of_oust; ++cur_receive) {
 		ret = fill_rq_entry(res, cur_receive);
 		if (ret < 0) {
 			pr_err("failed to fill_rq_entry\n");
@@ -195,8 +200,8 @@ static int fill_rq(struct ud_resources *res)
 	}
 
 	return 0;
-} 
-			
+}
+
 /*****************************************************************************
 * Function: ud_resources_create
 *****************************************************************************/
@@ -221,14 +226,14 @@ int ud_resources_create(struct ud_resources *res)
 			break;
 		}
 	}
-	
+
 	if (!ib_dev) {
 		pr_err("IB device %s wasn't found\n", config->dev_name);
 		return -ENXIO;
 	}
-	
+
 	pr_debug("Device %s was found\n", config->dev_name);
-	
+
 	/* get device handle */
 	res->ib_ctx = ibv_open_device(ib_dev);
 	if (!res->ib_ctx) {
@@ -241,7 +246,7 @@ int ud_resources_create(struct ud_resources *res)
 		pr_err("failed to create completion channel \n");
 		return -ENXIO;
 	}
-	
+
 	res->pd = ibv_alloc_pd(res->ib_ctx);
 	if (!res->pd) {
 		pr_err("ibv_alloc_pd failed\n");
@@ -260,7 +265,7 @@ int ud_resources_create(struct ud_resources *res)
 		pr_err("Couldn't request CQ notification\n");
 		return -1;
 	}
-	
+
 
 	res->send_cq = ibv_create_cq(res->ib_ctx, 1, NULL, NULL, 0);
 	if (!res->send_cq) {
@@ -270,7 +275,7 @@ int ud_resources_create(struct ud_resources *res)
 	pr_debug("CQ was created with %u CQEs\n", 1);
 
 	size = cq_size * RECV_BUF_SIZE + SEND_SIZE;
-	res->recv_buf = (void *) malloc(size);
+	res->recv_buf = malloc(size);
 	if (!res->recv_buf) {
 		pr_err("failed to malloc %Zu bytes to memory buffer\n", size);
 		return -ENOMEM;
@@ -295,7 +300,7 @@ int ud_resources_create(struct ud_resources *res)
 				.max_send_wr  = 1,
 				.max_recv_wr  = config->num_of_oust,
 				.max_send_sge = 1,
-				.max_recv_sge = 1				
+				.max_recv_sge = 1
 			},
 			.qp_type = IBV_QPT_UD,
 			.sq_sig_all = 1,
@@ -308,13 +313,13 @@ int ud_resources_create(struct ud_resources *res)
 		}
 		pr_debug("QP was created, QP number=0x%x\n", res->qp->qp_num);
 	}
-	
+
 	/* modify the QP to RTS (connect the QPs) */
 	if (modify_qp_to_rts(res->qp)) {
 		pr_err("failed to modify QP state from RESET to RTS\n");
 		return -1;
 	}
-	
+
 	pr_debug("QPs were modified to RTS\n");
 
 	if (fill_rq(res))
@@ -336,13 +341,23 @@ int ud_resources_create(struct ud_resources *res)
 		pr_err("Could not init mad_buffer_mutex, abort\n");
 		return -1;
 	}
-			
+
 	return 0;
+}
+
+uint16_t get_port_lid(struct ibv_context *ib_ctx, int port_num)
+{
+	struct ibv_port_attr port_attr;
+
+	return ibv_query_port(ib_ctx, port_num, &port_attr) == 0 ?
+		port_attr.lid : 0;
 }
 
 int create_ah(struct ud_resources *ud_res)
 {
 	struct ibv_ah_attr ah_attr;
+
+	assert(!ud_res->ah);
 
 	/* create the UD AV */
 	memset(&ah_attr, 0, sizeof(ah_attr));
@@ -370,28 +385,28 @@ int create_ah(struct ud_resources *ud_res)
 int ud_resources_destroy(struct ud_resources *res)
 {
 	int test_result = 0;
-	
+
 	if (res->qp) {
 		if (ibv_destroy_qp(res->qp)) {
 			pr_err("failed to destroy QP\n");
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->mr) {
 		if (ibv_dereg_mr(res->mr)) {
 			pr_err("ibv_dereg_mr failed\n");
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->send_cq) {
 		if (ibv_destroy_cq(res->send_cq)) {
 			pr_err("ibv_destroy_cq of CQ failed\n");
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->recv_cq) {
 		if (ibv_destroy_cq(res->recv_cq)) {
 			pr_err("ibv_destroy_cq of CQ failed\n");
@@ -412,24 +427,24 @@ int ud_resources_destroy(struct ud_resources *res)
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->pd) {
 		if (ibv_dealloc_pd(res->pd)) {
 			pr_err("ibv_dealloc_pd failed\n");
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->ib_ctx) {
 		if (ibv_close_device(res->ib_ctx)) {
 			pr_err("ibv_close_device failed\n");
 			test_result = 1;
 		}
 	}
-	
+
 	if (res->dev_list)
 		ibv_free_device_list(res->dev_list);
-	
+
 	if (res->recv_buf)
 		free(res->recv_buf);
 
@@ -440,12 +455,15 @@ int ud_resources_destroy(struct ud_resources *res)
 		free(res->mad_buffer_mutex);
 
 	return test_result;
-}	
+}
 
 static void fill_send_request(struct ud_resources *res, struct ibv_send_wr *psr,
        			      struct ibv_sge *psg, ib_mad_t *mad_hdr)
 {
 	static int wr_id=0;
+
+	assert(res->ah);
+
 	memset(psr, 0, sizeof(*psr));
 
 	psr->next = NULL;
@@ -464,7 +482,19 @@ static void fill_send_request(struct ud_resources *res, struct ibv_send_wr *psr,
 	psg->lkey = res->mr->lkey;
 }
 
-static int poll_cq(struct ibv_cq *cq, struct ibv_wc *wc, struct ibv_comp_channel *channel)
+static int stop_threads(struct sync_resources *sync_res)
+{
+	int result;
+
+	pthread_mutex_lock(&sync_res->retry_mutex);
+	result = sync_res->stop_threads;
+	pthread_mutex_unlock(&sync_res->retry_mutex);
+
+	return result;
+}
+
+static int poll_cq(struct sync_resources *sync_res, struct ibv_cq *cq,
+		   struct ibv_wc *wc, struct ibv_comp_channel *channel)
 {
 	int ret;
 	struct ibv_cq *ev_cq;
@@ -498,7 +528,9 @@ static int poll_cq(struct ibv_cq *cq, struct ibv_wc *wc, struct ibv_comp_channel
 		}
 
 		if (ret > 0 && wc->status != IBV_WC_SUCCESS) {
-			pr_err("got bad completion with status: 0x%x\n", wc->status);
+			if (!stop_threads(sync_res))
+				pr_err("got bad completion with status: 0x%x\n",
+				       wc->status);
 			return -ret;
 		}
 
@@ -514,7 +546,9 @@ static int poll_cq(struct ibv_cq *cq, struct ibv_wc *wc, struct ibv_comp_channel
 /*****************************************************************************
 * Function: register_to_trap
 *****************************************************************************/
-static int register_to_trap(struct ud_resources *res, int dest_lid, int trap_num)
+static int register_to_trap(struct sync_resources *sync_res,
+			    struct ud_resources *res, int dest_lid,
+			    int trap_num, int subscribe)
 {
 	struct ibv_send_wr sr;
 	struct ibv_wc wc;
@@ -524,12 +558,18 @@ static int register_to_trap(struct ud_resources *res, int dest_lid, int trap_num
 	int counter = 0;
 	int rc = 0;
 	int ret;
+	long long unsigned comp_mask = 0;
 
 	ib_mad_t *mad_hdr = (ib_mad_t *) (res->send_buf);
         ib_sa_mad_t* p_sa_mad = (ib_sa_mad_t *) (res->send_buf);
 	ib_inform_info_t *data = (ib_inform_info_t *) (p_sa_mad->data);
 	static uint64_t trans_id = 0x0000FFFF;
-	pr_debug("Registering to trap:%d (sm in %d)\n", trap_num, dest_lid);
+
+	if (subscribe)
+		pr_debug("Registering to trap:%d (sm in %d)\n", trap_num, dest_lid);
+	else
+		pr_debug("Deregistering from trap:%d (sm in %d)\n", trap_num, dest_lid);
+
 	memset(res->send_buf, 0, SEND_SIZE);
 
 	fill_send_request(res, &sr, &sg, mad_hdr);
@@ -543,16 +583,37 @@ static int register_to_trap(struct ud_resources *res, int dest_lid, int trap_num
 			0 );                       /* Attribute Modifier */
 
 
-	data->lid_range_begin                  = 0xFFFF; 
-	data->is_generic                       = 1;
-	data->subscribe                        = 1;
-	data->trap_type                        = htons(3); /* SM */
-	data->g_or_v.generic.trap_num          = htons(trap_num);
-        data->g_or_v.generic.node_type_msb     = 0;
-        data->g_or_v.generic.node_type_lsb     = htons(4); /* Class Manager */
+	data->lid_range_begin = 0xFFFF;
+	data->is_generic = 1;
+	data->subscribe = subscribe;
+	if (trap_num == SRP_TRAP_JOIN)
+		data->trap_type = htons(3); /* SM */
+	else if (trap_num == SRP_TRAP_CHANGE_CAP)
+		data->trap_type = htons(4); /* Informational */
+	data->g_or_v.generic.trap_num = htons(trap_num);
+        data->g_or_v.generic.node_type_msb = 0;
+	if (trap_num == SRP_TRAP_JOIN)
+		/* Class Manager */
+		data->g_or_v.generic.node_type_lsb = htons(4);
+	else if (trap_num == SRP_TRAP_CHANGE_CAP)
+		/* Channel Adapter */
+		data->g_or_v.generic.node_type_lsb = htons(1);
 
-        p_sa_mad->comp_mask = htonll( 2 | 16 | 32 | 64 | 128 | 4096 ); 
-           
+	comp_mask |= SRP_INFORMINFO_LID_COMP	    |
+		     SRP_INFORMINFO_ISGENERIC_COMP  |
+		     SRP_INFORMINFO_SUBSCRIBE_COMP  |
+		     SRP_INFORMINFO_TRAPTYPE_COMP   |
+		     SRP_INFORMINFO_TRAPNUM_COMP    |
+		     SRP_INFORMINFO_PRODUCER_COMP;
+
+	if (!data->subscribe) {
+	    data->g_or_v.generic.qpn_resp_time_val = htonl(res->qp->qp_num << 8);
+	    comp_mask |= SRP_INFORMINFO_QPN_COMP;
+	}
+
+	p_sa_mad->comp_mask = htonll(comp_mask);
+	pr_debug("comp_mask: %llx\n", comp_mask);
+
 	do {
 		pthread_mutex_lock(res->mad_buffer_mutex);
 		res->mad_buffer->base_ver = 0; // flag that the buffer is empty
@@ -565,8 +626,8 @@ static int register_to_trap(struct ud_resources *res, int dest_lid, int trap_num
 			pr_err("failed to post SR\n");
 			return ret;
 		}
-			
-		ret = poll_cq(res->send_cq, &wc, NULL);
+
+		ret = poll_cq(sync_res, res->send_cq, &wc, NULL);
 		if (ret < 0)
 			return ret;
 
@@ -599,7 +660,8 @@ static int register_to_trap(struct ud_resources *res, int dest_lid, int trap_num
 /*****************************************************************************
 * Function: response_to_trap
 *****************************************************************************/
-static int response_to_trap(struct ud_resources *res, ib_sa_mad_t *mad_buffer)
+static int response_to_trap(struct sync_resources *sync_res,
+			    struct ud_resources *res, ib_sa_mad_t *mad_buffer)
 {
 	struct ibv_send_wr sr;
 	struct ibv_sge sg;
@@ -610,9 +672,7 @@ static int response_to_trap(struct ud_resources *res, ib_sa_mad_t *mad_buffer)
 
 	ib_sa_mad_t *response_buffer = (ib_sa_mad_t *) (res->send_buf);
 
-	memcpy((void *) response_buffer, 
-	       (void *) mad_buffer, 
-	       sizeof(ib_sa_mad_t));
+	memcpy(response_buffer, mad_buffer, sizeof(ib_sa_mad_t));
 	response_buffer->method = SRP_SA_METHOD_REPORT_RESP;
 
 	fill_send_request(res, &sr, &sg, (ib_mad_t *) response_buffer);
@@ -621,7 +681,7 @@ static int response_to_trap(struct ud_resources *res, ib_sa_mad_t *mad_buffer)
 		pr_err("failed to post response\n");
 		return ret;
 	}
-	ret = poll_cq(res->send_cq, &wc, NULL);
+	ret = poll_cq(sync_res, res->send_cq, &wc, NULL);
 
 	return ret;
 }
@@ -634,21 +694,24 @@ static int get_trap_notices(struct resources *res)
 {
 	struct ibv_wc wc;
 	int cur_receive = 0;
-	int ret;
+	int ret = 0;
+	int pkey_index;
+	uint16_t pkey;
 	char *buffer;
 	ib_sa_mad_t *mad_buffer;
 	ib_mad_notice_attr_t *notice_buffer;
 	int trap_num;
 
-	while (!res->sync_res->stop_threads) {
-	
-		ret = poll_cq(res->ud_res->recv_cq, &wc, res->ud_res->channel);
+	while (!stop_threads(res->sync_res)) {
+
+		ret = poll_cq(res->sync_res, res->ud_res->recv_cq, &wc,
+			      res->ud_res->channel);
 		if (ret < 0)
-			exit(-ret);
-		
+			continue;
+
 		pr_debug("get_trap_notices: Got CQE wc.wr_id=%lld\n", (long long int) wc.wr_id);
 		cur_receive = wc.wr_id;
-		buffer = (void *)(((unsigned long)res->ud_res->recv_buf) + RECV_BUF_SIZE * cur_receive);
+		buffer = res->ud_res->recv_buf + RECV_BUF_SIZE * cur_receive;
 		mad_buffer = (ib_sa_mad_t *) (buffer + GRH_SIZE);
 
 		if ((mad_buffer->mgmt_class == SRP_MGMT_CLASS_SA) &&
@@ -659,29 +722,43 @@ static int get_trap_notices(struct resources *res)
 			*res->ud_res->mad_buffer = *mad_buffer;
 			pthread_mutex_unlock(res->ud_res->mad_buffer_mutex);
 		} else if ((mad_buffer->mgmt_class == SRP_MGMT_CLASS_SA) &&
-		    (mad_buffer->method == SRP_SA_METHOD_REPORT) && 
+		    (mad_buffer->method == SRP_SA_METHOD_REPORT) &&
 		    (ntohs(mad_buffer->attr_id) == SRP_MAD_ATTR_NOTICE))
 		{ /* this is a trap notice */
+			pkey_index = wc.pkey_index;
+			ret = pkey_index_to_pkey(res->umad_res, pkey_index, &pkey);
+			if (ret) {
+				pr_err("get_trap_notices: Got Bad pkey_index (%d)\n",
+				       pkey_index);
+				wake_up_main_loop();
+				break;
+			}
+
 			notice_buffer = (ib_mad_notice_attr_t *) (mad_buffer->data);
 			trap_num = ntohs(notice_buffer->g_or_v.generic.trap_num);
-			response_to_trap(res->ud_res, mad_buffer);
+			response_to_trap(res->sync_res, res->ud_res, mad_buffer);
 			if (trap_num == SRP_TRAP_JOIN)
-				push_gid_to_list(res->sync_res, &notice_buffer->data_details.ntc_64_67.gid);				
+				push_gid_to_list(res->sync_res,
+						 &notice_buffer->data_details.ntc_64_67.gid,
+						 pkey);
 			else if (trap_num == SRP_TRAP_CHANGE_CAP) {
 				if (ntohl(notice_buffer->data_details.ntc_144.new_cap_mask) & SRP_IS_DM)
-					push_lid_to_list(res->sync_res, ntohs(notice_buffer->data_details.ntc_144.lid));
+					push_lid_to_list(res->sync_res,
+							 ntohs(notice_buffer->data_details.ntc_144.lid),
+							 pkey);
 			} else {
 				pr_err("Unhandled trap_num %d\n", trap_num);
 			}
 		}
 
 		ret = fill_rq_entry(res->ud_res, cur_receive);
-		if (ret < 0)
-			exit(-ret);
-		
+		if (ret < 0) {
+			wake_up_main_loop();
+			break;
+		}
 	}
-	return 0;
-}	
+	return ret;
+}
 
 void *run_thread_get_trap_notices(void *res_in)
 {
@@ -698,43 +775,22 @@ void *run_thread_get_trap_notices(void *res_in)
 /*****************************************************************************
 * Function: register_to_traps
 *****************************************************************************/
-int register_to_traps(struct ud_resources *ud_res)
+int register_to_traps(struct resources *res, int subscribe)
 {
 	int rc;
 	int trap_numbers[] = {SRP_TRAP_JOIN, SRP_TRAP_CHANGE_CAP};
 	int i;
-	
+
 	for (i=0; i < sizeof(trap_numbers) / sizeof(*trap_numbers); ++i) {
-		rc = register_to_trap(ud_res, ud_res->port_attr.sm_lid, trap_numbers[i]);
+		rc = register_to_trap(res->sync_res, res->ud_res,
+				      res->ud_res->port_attr.sm_lid,
+				      trap_numbers[i], subscribe);
 		if (rc != 0)
 			return rc;
 	}
 
 	return 0;
-	
-} 
 
-void *run_thread_wait_till_timeout(void *res_in)
-{
-	struct resources *res = (struct resources *)res_in;
-	time_t cur_time, sleep_time;
-  
-	res->sync_res->next_recalc_time = time(NULL) + config->recalc_time;
-	while (!res->sync_res->stop_threads) {
-		cur_time = time(NULL);
-		sleep_time = res->sync_res->next_recalc_time - cur_time;
-		if (sleep_time < 0) {
-			pthread_mutex_lock(&res->sync_res->mutex);
-			res->sync_res->recalc = 1;
-			res->sync_res->next_recalc_time = time(NULL) + config->recalc_time;
-			pthread_cond_signal(&res->sync_res->cond);
-			pthread_mutex_unlock(&res->sync_res->mutex);
-		} else
-			srp_sleep(sleep_time, 0);
-	}
-	pr_debug("wait_till_timeout thread ended\n");
-
-	pthread_exit((void *)0);
 }
 
 void *run_thread_listen_to_events(void *res_in)
@@ -742,41 +798,41 @@ void *run_thread_listen_to_events(void *res_in)
 	struct resources *res = (struct resources *)res_in;
 	struct ibv_async_event event;
 
-	while (1) {
+	while (!stop_threads(res->sync_res)) {
 		if (ibv_get_async_event(res->ud_res->ib_ctx, &event)) {
-			if (errno == EINTR)
-				continue;
-			pr_err("ibv_get_async_event failed\n");
-			exit(-errno);
+			if (errno != EINTR)
+				pr_err("ibv_get_async_event failed (errno = %d)\n",
+				       errno);
+			break;
 		}
 
 		pr_debug("event_type %d, port %d\n",
 			 event.event_type, event.element.port_num);
-	
+
 		switch (event.event_type) {
 		case IBV_EVENT_PORT_ACTIVE:
 		case IBV_EVENT_SM_CHANGE:
 		case IBV_EVENT_LID_CHANGE:
 		case IBV_EVENT_CLIENT_REREGISTER:
+		case IBV_EVENT_PKEY_CHANGE:
 			if (event.element.port_num == config->port_num) {
 				pthread_mutex_lock(&res->sync_res->mutex);
-		    		res->sync_res->recalc = 1;
-				pthread_cond_signal(&res->sync_res->cond);
+				__schedule_rescan(res->sync_res, 0);
+				wake_up_main_loop();
 				pthread_mutex_unlock(&res->sync_res->mutex);
 			}
 		  	break;
-	  
-		case IBV_EVENT_PKEY_CHANGE:
+
 		case IBV_EVENT_DEVICE_FATAL:
 		case IBV_EVENT_CQ_ERR:
 		case IBV_EVENT_QP_FATAL:
 		  /* clean and restart */
-			pr_err("Critical event, ending\n");
+			pr_err("Critical event %d, ending\n", event.event_type);
 			exit(EAGAIN);
-	  
+
 
  	      	 /*
-  
+
 		case IBV_EVENT_PORT_ERR:
 		case IBV_EVENT_QP_REQ_ERR:
 		case IBV_EVENT_QP_ACCESS_ERR:
@@ -787,10 +843,10 @@ void *run_thread_listen_to_events(void *res_in)
 		case IBV_EVENT_SRQ_ERR:
 		case IBV_EVENT_SRQ_LIMIT_REACHED:
 		case IBV_EVENT_QP_LAST_WQE_REACHED:
-	
+
 		*/
 
-	
+
 		default:
 			break;
 		}
@@ -798,5 +854,7 @@ void *run_thread_listen_to_events(void *res_in)
 		ibv_ack_async_event(&event);
 
 	}
+
+	return NULL;
 }
 

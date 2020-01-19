@@ -39,6 +39,9 @@
 
 #define _GNU_SOURCE
 
+#include <assert.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +60,8 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/syslog.h>
 #include <infiniband/umad.h>
 #include "srp_ib_types.h"
 
@@ -64,17 +69,66 @@
 
 #define IBDEV_STR_SIZE 16
 #define IBPORT_STR_SIZE 16
-
-typedef struct {
-	struct ib_user_mad hdr;
-	char filler[MAD_BLOCK_SIZE];
-} srp_ib_user_mad_t;
+#define IGNORE(value) do { if (value) { } } while (0)
+#define max_t(type, x, y) ({                    \
+	type __max1 = (x);	\
+	type __max2 = (y);	\
+	__max1 > __max2 ? __max1: __max2; })
 
 #define get_data_ptr(mad) ((void *) ((mad).hdr.data))
 
-static char *sysfs_path = "/sys";
+enum log_dest { log_to_syslog, log_to_stderr };
 
-int srpd_sys_read_string(char *dir_name, char *file_name, char *str, int max_len)
+static int get_lid(struct umad_resources *umad_res, ib_gid_t *gid, uint16_t *lid);
+
+static const int   node_table_response_size = 1 << 18;
+static char *sysfs_path = "/sys";
+static enum log_dest s_log_dest = log_to_syslog;
+static int received_signal, wakeup_pipe[2] = { -1, -1 };
+
+
+void wake_up_main_loop(void)
+{
+	int res;
+
+	assert(wakeup_pipe[1] >= 0);
+	res = write(wakeup_pipe[1], ".", 1);
+	IGNORE(res);
+}
+
+static void signal_handler(int signo)
+{
+	received_signal = signo;
+	wake_up_main_loop();
+}
+
+static int check_process_uniqueness(struct config_t *conf)
+{
+	char path[256];
+	int fd;
+
+	snprintf(path, sizeof(path), "/var/tmp/srp_daemon_%s_%d",
+		 conf->dev_name, conf->port_num);
+
+	if ((fd = open(path, O_CREAT|O_RDWR,
+		       S_IRUSR|S_IRGRP|S_IROTH|S_IWUSR)) < 0) {
+		pr_err("cannot open file \"%s\" (errno: %d).\n", path, errno);
+		return -1;
+	}
+
+	fchmod(fd, S_IRUSR|S_IRGRP|S_IROTH|S_IWUSR|S_IWGRP|S_IWOTH);
+	if (0 != lockf(fd, F_TLOCK, 0)) {
+		pr_err("failed to lock %s (errno: %d). possibly another "
+		       "srp_daemon is locking it\n", path, errno);
+		close(fd);
+		fd = -1;
+	}
+
+	return fd;
+}
+
+int srpd_sys_read_string(const char *dir_name, const char *file_name,
+			 char *str, int max_len)
 {
 	char path[256], *s;
 	int fd, r;
@@ -135,7 +189,7 @@ int srpd_sys_read_uint64(char *dir_name, char *file_name, uint64_t *u)
 
 static void usage(const char *argv0)
 {
-	fprintf(stderr, "Usage: %s [-vVcaeon] [-d <umad device> | -i <infiniband device> [-p <port_num>]] [-t <timoeout (ms)>] [-r <retries>] [-R <rescan time>] [-f <rules file>\n", argv0);
+	fprintf(stderr, "Usage: %s [-vVcaeon] [-d <umad device> | -i <infiniband device> [-p <port_num>]] [-t <timeout (ms)>] [-r <retries>] [-R <rescan time>] [-f <rules file>\n", argv0);
 	fprintf(stderr, "-v 			Verbose\n");
 	fprintf(stderr, "-V 			debug Verbose\n");
 	fprintf(stderr, "-c 			prints connection Commands\n");
@@ -143,21 +197,22 @@ static void usage(const char *argv0)
 	fprintf(stderr, "-e 			Executes connection commands\n");
 	fprintf(stderr, "-o 			runs only Once and stop\n");
 	fprintf(stderr, "-d <umad device>	use umad Device \n");
-	fprintf(stderr, "-i <infiniband device>	use Infiniband device \n");
+	fprintf(stderr, "-i <infiniband device>	use InfiniBand device \n");
 	fprintf(stderr, "-p <port_num>		use Port num \n");
 	fprintf(stderr, "-R <rescan time>	perform complete Rescan every <rescan time> seconds\n");
 	fprintf(stderr, "-T <retry timeout>	Retries to connect to existing target after Timeout of <retry timeout> seconds\n");
+	fprintf(stderr, "-l <tl_retry timeout>	Transport retry count before failing IO. should be in range [2..7], (default 2)\n");
 	fprintf(stderr, "-f <rules file>	use rules File to set to which target(s) to connect (default: /etc/srp_daemon.conf\n");
-	fprintf(stderr, "-t <timoeout>		Timeout for mad response in milisec \n");
+	fprintf(stderr, "-t <timeout>		Timeout for mad response in milliseconds\n");
 	fprintf(stderr, "-r <retries>		number of send Retries for each mad\n");
-	fprintf(stderr, "-n 			New connection command format - use also initiator extention\n");
+	fprintf(stderr, "-n 			New connection command format - use also initiator extension\n");
 	fprintf(stderr, "\nExample: srp_daemon -e -n -i mthca0 -p 1 -R 60\n");
 }
 
-static int 
+static int
 check_equal_uint64(char *dir_name, char *attr, uint64_t val)
 {
-uint64_t attr_value;
+	uint64_t attr_value;
 
 	if (srpd_sys_read_uint64(dir_name, attr, &attr_value))
 		return 0;
@@ -165,8 +220,18 @@ uint64_t attr_value;
 	return attr_value == val;
 }
 
+static int
+check_equal_uint16(char *dir_name, char *attr, uint16_t val)
+{
+	uint64_t attr_value;
 
-int recalc(struct resources *res);
+	if (srpd_sys_read_uint64(dir_name, attr, &attr_value))
+		return 0;
+
+	return val == (attr_value & 0xffff);
+}
+
+static int recalc(struct resources *res);
 
 void pr_cmd(char *target_str, int not_connected)
 {
@@ -187,6 +252,26 @@ void pr_cmd(char *target_str, int not_connected)
 	}
 }
 
+void pr_err(const char *fmt, ...)
+{
+	va_list args;
+	int pos;
+	char str[1000];
+
+	va_start(args, fmt);
+	pos = vsnprintf(str, sizeof(str), fmt, args);
+	va_end(args);
+	if (pos >= sizeof(str))
+		str[sizeof(str) - 1] = '\0';
+	switch (s_log_dest) {
+	case log_to_syslog:
+		syslog(LOG_DAEMON | LOG_ERR, "%s", str);
+		break;
+	case log_to_stderr:
+		fprintf(stderr, "%s", str);
+		break;
+	}
+}
 
 static int check_not_equal_str(char *dir_name, char *attr, char *value)
 {
@@ -227,7 +312,7 @@ int is_enabled_by_rules_file(struct target_details *target)
 	int rule;
 	struct config_t *conf = config;
 
-	if (NULL == conf->rules) 
+	if (NULL == conf->rules)
 		return 1;
 
 	pr_debug("Found an SRP target with id_ext %s - check if it allowed by rules file\n", target->id_ext);
@@ -235,33 +320,38 @@ int is_enabled_by_rules_file(struct target_details *target)
 	do {
 		rule++;
 		if (conf->rules[rule].id_ext[0] != '\0' &&
-		    strtoull(target->id_ext, 0, 16) != 
+		    strtoull(target->id_ext, 0, 16) !=
 		    strtoull(conf->rules[rule].id_ext, 0, 16))
-				continue;
+			continue;
 
 		if (conf->rules[rule].ioc_guid[0] != '\0' &&
-		    ntohll(target->ioc_prof.guid) != 
+		    ntohll(target->ioc_prof.guid) !=
 		    strtoull(conf->rules[rule].ioc_guid, 0, 16))
-				continue;
+			continue;
 
 		if (conf->rules[rule].dgid[0] != '\0') {
 			char tmp = conf->rules[rule].dgid[16];
 			conf->rules[rule].dgid[16] = '\0';
-			if (strtoull(conf->rules[rule].dgid, 0, 16) != 
+			if (strtoull(conf->rules[rule].dgid, 0, 16) !=
 			    target->subnet_prefix) {
 				conf->rules[rule].dgid[16] = tmp;
 				continue;
 			}
 			conf->rules[rule].dgid[16] = tmp;
-			if (strtoull(&conf->rules[rule].dgid[16], 0, 16) != 
-			    target->h_guid) 
+			if (strtoull(&conf->rules[rule].dgid[16], 0, 16) !=
+			    target->h_guid)
 				continue;
 		}
 
 		if (conf->rules[rule].service_id[0] != '\0' &&
 		    strtoull(conf->rules[rule].service_id, 0, 16) !=
 	            target->h_service_id)
-				continue;
+			continue;
+
+		if (conf->rules[rule].pkey[0] != '\0' &&
+		    (uint16_t)strtoul(conf->rules[rule].pkey, 0, 16) !=
+	            target->pkey)
+			continue;
 
 		target->options = conf->rules[rule].options;
 
@@ -283,7 +373,7 @@ static int add_non_exist_target(struct target_details *target)
 	uint8_t dgid_val[16];
 	const int MAX_TARGET_CONFIG_STR_STRING = 255;
 	char target_config_str[MAX_TARGET_CONFIG_STR_STRING];
-	int len, len_left;
+	int len;
 	int not_connected = 1;
 
 	pr_debug("Found an SRP target with id_ext %s - check if it is already connected\n", target->id_ext);
@@ -300,7 +390,7 @@ static int add_non_exist_target(struct target_details *target)
 	subdir = (void *) 1; /* Dummy value to enter the loop */
 	while (subdir) {
 	        subdir = readdir(dir);
-		
+
 		if (!subdir)
 			continue;
 
@@ -309,9 +399,13 @@ static int add_non_exist_target(struct target_details *target)
 
 		strncpy(subdir_name_ptr, subdir->d_name,
 			MAX_SCSI_HOST_DIR_NAME_LENGTH - prefix_len);
-		if (!check_equal_uint64(scsi_host_dir, "id_ext", 
+		if (!check_equal_uint64(scsi_host_dir, "id_ext",
 				        strtoull(target->id_ext, 0, 16)))
 			continue;
+		if (!check_equal_uint16(scsi_host_dir, "pkey", target->pkey) &&
+		    !config->execute)
+			continue;
+
 		if (!check_equal_uint64(scsi_host_dir, "service_id",
 					target->h_service_id))
 			continue;
@@ -319,10 +413,10 @@ static int add_non_exist_target(struct target_details *target)
 					ntohll(target->ioc_prof.guid)))
 			continue;
 		if (srpd_sys_read_gid(scsi_host_dir, "orig_dgid", dgid_val)) {
-			/* 
-			 * In case this is an old kernel taht does not have 
-			 * orig_dgid in sysfs, use dgid instead (this is 
-			 * problematic when there is a dgid redirection 
+			/*
+			 * In case this is an old kernel that does not have
+			 * orig_dgid in sysfs, use dgid instead (this is
+			 * problematic when there is a dgid redirection
 			 * by the CM)
 			 */
 			if (srpd_sys_read_gid(scsi_host_dir, "dgid", dgid_val))
@@ -343,16 +437,16 @@ static int add_non_exist_target(struct target_details *target)
 
 		/* there is a match - this target is already connected */
 
-		/* There is a rare possability of a race in the following 
-		   scnario: 
-			a. A link goes down, 
+		/* There is a rare possibility of a race in the following
+		   scenario:
+			a. A link goes down,
 			b. ib_srp decide to remove the corresponding scsi_host.
 			c. Before removing it, the link returns
 			d. srp_daemon gets trap 64.
-			e. srp_daemon thinks that this target is still 
-			   connected (ib_srp have not removed it yet) so it
+			e. srp_daemon thinks that this target is still
+			   connected (ib_srp has not removed it yet) so it
 			   does not connect to it.
-			f. ib_srp continue to removes the scsi_host.
+			f. ib_srp continue to remove the scsi_host.
 		    As a result there is no connection to a target in the fabric
 		    and there will not be a new trap.
 
@@ -360,9 +454,9 @@ static int add_non_exist_target(struct target_details *target)
 		   if this target exist in the near future.
 		*/
 
-		
 
-		/* If there is a need to print all we will continue to pr_cmd. 
+
+		/* If there is a need to print all we will continue to pr_cmd.
 		   not_connected is set to zero to make sure that this target
 		   will be printed but not connected.
 		*/
@@ -381,54 +475,65 @@ static int add_non_exist_target(struct target_details *target)
 	len = snprintf(target_config_str, MAX_TARGET_CONFIG_STR_STRING, "id_ext=%s,"
 		"ioc_guid=%016llx,"
 		"dgid=%016llx%016llx,"
-		"pkey=ffff,"
+		"pkey=%04x,"
 		"service_id=%016llx",
 		target->id_ext,
 		(unsigned long long) ntohll(target->ioc_prof.guid),
 		(unsigned long long) target->subnet_prefix,
 		(unsigned long long) target->h_guid,
+		target->pkey,
 		(unsigned long long) target->h_service_id);
 	if (len >= MAX_TARGET_CONFIG_STR_STRING) {
-		pr_err("Target conifg string is too long, ignoring target\n");
+		pr_err("Target config string is too long, ignoring target\n");
 		closedir(dir);
 		return -1;
 	}
 
 	if (target->ioc_prof.io_class != htons(SRP_REV16A_IB_IO_CLASS)) {
-		len_left = MAX_TARGET_CONFIG_STR_STRING - len;
-		len += snprintf(target_config_str+len, 
+		len += snprintf(target_config_str+len,
 				MAX_TARGET_CONFIG_STR_STRING - len,
 				",io_class=%04hx", ntohs(target->ioc_prof.io_class));
 
 		if (len >= MAX_TARGET_CONFIG_STR_STRING) {
-			pr_err("Target conifg string is too long, ignoring target\n");
+			pr_err("Target config string is too long, ignoring target\n");
 			closedir(dir);
 			return -1;
 		}
 	}
 
 	if (config->print_initiator_ext) {
-		len_left = MAX_TARGET_CONFIG_STR_STRING - len;
-		len += snprintf(target_config_str+len, 
+		len += snprintf(target_config_str+len,
 				MAX_TARGET_CONFIG_STR_STRING - len,
 				",initiator_ext=%016llx",
 				(unsigned long long) ntohll(target->h_guid));
 
 		if (len >= MAX_TARGET_CONFIG_STR_STRING) {
-			pr_err("Target conifg string is too long, ignoring target\n");
+			pr_err("Target config string is too long, ignoring target\n");
+			closedir(dir);
+			return -1;
+		}
+	}
+
+	if (config->execute && config->tl_retry_count) {
+		len += snprintf(target_config_str + len,
+				MAX_TARGET_CONFIG_STR_STRING - len,
+				",tl_retry_count=%d", config->tl_retry_count);
+
+		if (len >= MAX_TARGET_CONFIG_STR_STRING) {
+			pr_err("Target config string is too long, ignoring target\n");
 			closedir(dir);
 			return -1;
 		}
 	}
 
 	if (target->options) {
-		len += snprintf(target_config_str+len, 
+		len += snprintf(target_config_str+len,
 				MAX_TARGET_CONFIG_STR_STRING - len,
 				"%s",
 				target->options);
 
 		if (len >= MAX_TARGET_CONFIG_STR_STRING) {
-			pr_err("Target conifg string is too long, ignoring target\n");
+			pr_err("Target config string is too long, ignoring target\n");
 			closedir(dir);
 			return -1;
 		}
@@ -439,7 +544,7 @@ static int add_non_exist_target(struct target_details *target)
 	pr_cmd(target_config_str, not_connected);
 
 	closedir(dir);
-	
+
 	return 1;
 }
 
@@ -451,48 +556,53 @@ int send_and_get(int portid, int agent, srp_ib_user_mad_t *out_mad,
 	int i, len;
 	int in_agent;
 	int ret;
-	static uint32_t tid = 1;
+	static uint32_t tid;
+	uint32_t received_tid;
 
 	for (i = 0; i < config->mad_retries; ++i) {
-		((uint32_t *) &out_dm_mad->tid)[1] = ++tid;
+		/* Skip tid 0 because OpenSM ignores it. */
+		if (++tid == 0)
+			++tid;
+		out_dm_mad->tid = htonll(tid);
 
-		ret = umad_send(portid, agent,
-			        (struct ib_user_mad *) out_mad, MAD_BLOCK_SIZE,
+		ret = umad_send(portid, agent, out_mad, MAD_BLOCK_SIZE,
 				config->timeout, 0);
 		if (ret < 0) {
-			pr_err("umad_send to %u failed\n", 
+			pr_err("umad_send to %u failed\n",
 				(uint16_t) ntohs(out_mad->hdr.addr.lid));
 			return ret;
 		}
 
 		do {
+recv:
 			len = in_mad_size ? in_mad_size : MAD_BLOCK_SIZE;
-			in_agent = umad_recv(portid, (struct ib_user_mad *) in_mad, 
+			in_agent = umad_recv(portid, (struct ib_user_mad *) in_mad,
 					     &len, config->timeout);
 			if (in_agent < 0) {
-				pr_err("umad_recv from %u failed - %d\n", 
-					(uint16_t) ntohs(out_mad->hdr.addr.lid), 
+				pr_err("umad_recv from %u failed - %d\n",
+					(uint16_t) ntohs(out_mad->hdr.addr.lid),
 					in_agent);
 				return in_agent;
 			}
 			if (in_agent != agent) {
 				pr_debug("umad_recv returned different agent\n");
-				continue;
+				goto recv;
 			}
 
-			ret = umad_status((struct ib_user_mad *) in_mad);
+			ret = umad_status(in_mad);
 			if (ret) {
 				pr_err(
-					"bad MAD status (%u) from lid %d\n", 
+					"bad MAD status (%u) from lid %d\n",
 					ret, (uint16_t) ntohs(out_mad->hdr.addr.lid));
 				return -ret;
-			} 
+			}
 
-			if (tid != ((uint32_t *) &in_dm_mad->tid)[1])
-				pr_debug("umad_recv returned different transaction id sent %d got %d\n", 
-					 tid, ((uint32_t *) &in_dm_mad->tid)[1]);
+			received_tid = ntohll(in_dm_mad->tid);
+			if (tid != received_tid)
+				pr_debug("umad_recv returned different transaction id sent %d got %d\n",
+					 tid, received_tid);
 
-		} while (tid > ((uint32_t *) &in_dm_mad->tid)[1]);
+		} while ((int32_t)(tid - received_tid) > 0);
 
 		if (len > 0)
 			return len;
@@ -519,7 +629,7 @@ static void initialize_sysfs()
 }
 
 static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
-					    char **ibport) 
+					    char **ibport)
 {
 	char *class_dev_path;
 	char *umad_dev_name;
@@ -534,7 +644,7 @@ static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
 
 	ret = asprintf(&class_dev_path, "%s/class/infiniband_mad/%s", sysfs_path,
 		       umad_dev_name);
-	
+
 	if (ret < 0) {
  		pr_err("out of memory\n");
 		return -ENOMEM;
@@ -547,7 +657,7 @@ static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
 		goto end;
 	}
 
-	if (srpd_sys_read_string(class_dev_path, "ibdev", *ibdev, 
+	if (srpd_sys_read_string(class_dev_path, "ibdev", *ibdev,
 			    IBDEV_STR_SIZE) < 0) {
 		pr_err("Couldn't read ibdev attribute\n");
 		ret = -1;
@@ -569,11 +679,11 @@ static int translate_umad_to_ibdev_and_port(char *umad_dev, char **ibdev,
 	ret = 0;
 
 end:
-	free(class_dev_path);		
+	free(class_dev_path);
 	return ret;
 }
 
-static void init_srp_mad(srp_ib_user_mad_t *out_umad, int agent, 
+static void init_srp_mad(srp_ib_user_mad_t *out_umad, int agent,
 			 uint16_t h_dlid, uint16_t h_attr_id, uint32_t h_attr_mod)
 {
 	struct srp_dm_mad *out_mad;
@@ -751,7 +861,7 @@ static int get_svc_entries(struct umad_resources *umad_res, uint16_t dlid, int i
 	return 0;
 }
 
-static int do_port(struct resources *res, uint16_t dlid,
+static int do_port(struct resources *res, uint16_t pkey, uint16_t dlid,
 		   uint64_t subnet_prefix, uint64_t h_guid)
 {
 	struct umad_resources 	       *umad_res = res->umad_res;
@@ -762,9 +872,9 @@ static int do_port(struct resources *res, uint16_t dlid,
 	static const uint64_t topspin_oui = 0x0005ad0000000000ull;
 	static const uint64_t oui_mask    = 0xffffff0000000000ull;
 
-	struct target_details *target = (struct target_details *) 
+	struct target_details *target = (struct target_details *)
 		malloc(sizeof(struct target_details));
-	
+
 	target->subnet_prefix = subnet_prefix;
 	target->h_guid = h_guid;
 	target->options = NULL;
@@ -775,13 +885,15 @@ static int do_port(struct resources *res, uint16_t dlid,
 		pr_err("Warning: set of ClassPortInfo failed\n");
 
 	ret = get_iou_info(umad_res, dlid, &iou_info);
-	if (ret < 0)
-		return ret;
+	if (ret < 0) {
+		pr_err("failed to get iou info for dlid %x\n", dlid);
+		goto out;
+	}
 
 	pr_human("IO Unit Info:\n");
 	pr_human("    port LID:        %04x\n", dlid);
 	pr_human("    port GID:        %016llx%016llx\n",
-		 (unsigned long long) target->subnet_prefix, 
+		 (unsigned long long) target->subnet_prefix,
 		 (unsigned long long) target->h_guid);
 	pr_human("    change ID:       %04x\n", ntohs(iou_info.change_id));
 	pr_human("    max controllers: 0x%02x\n", iou_info.max_controllers);
@@ -840,9 +952,10 @@ static int do_port(struct resources *res, uint16_t dlid,
 						 svc_entries.service[k].name);
 
 					target->h_service_id = ntohll(svc_entries.service[k].id);
+					target->pkey = pkey;
 					if (is_enabled_by_rules_file(target)) {
 						if (!add_non_exist_target(target) && !config->once) {
-							target->retry_time = 
+							target->retry_time =
 								time(NULL) + config->retry_timeout;
 							push_to_retry_list(res->sync_res, target);
 						}
@@ -854,8 +967,9 @@ static int do_port(struct resources *res, uint16_t dlid,
 
 	pr_human("\n");
 
+out:
 	free(target);
-	return 0;
+	return ret;
 }
 
 int get_node(struct umad_resources *umad_res, uint16_t dlid, uint64_t *guid)
@@ -910,18 +1024,118 @@ static int get_port_info(struct umad_resources *umad_res, uint16_t dlid,
 	return 0;
 }
 
+int pkey_index_to_pkey(struct umad_resources *umad_res, int pkey_index,
+		       uint16_t *pkey)
+{
+	char pkey_file[16], pkey_str[16];
+
+	/* Read pkey */
+	snprintf(pkey_file, sizeof(pkey_file), "pkeys/%d", pkey_index);
+	if (srpd_sys_read_string(umad_res->port_sysfs_path, pkey_file,
+				 pkey_str, sizeof(pkey_str)) < 0)
+		return -1;
+
+	*pkey = strtoul(pkey_str, NULL, 0);
+	if (*pkey)
+		pr_debug("discover Targets for P_key %04x (index %d)\n",
+			 *pkey, pkey_index);
+	return 0;
+}
+
+static int get_shared_pkeys(struct resources *res,
+			    uint16_t dest_port_lid,
+			    uint16_t *pkeys)
+{
+	struct umad_resources          *umad_res = res->umad_res;
+	uint8_t                        *in_mad_buf;
+	srp_ib_user_mad_t		out_mad;
+	struct ib_user_mad	       *in_mad;
+	struct srp_dm_rmpp_sa_mad      *out_sa_mad, *in_sa_mad;
+	ib_path_rec_t		       *path_rec;
+	ssize_t len;
+	int size;
+	int i, num_pkeys = 0;
+	uint16_t pkey;
+	uint16_t local_port_lid = get_port_lid(res->ud_res->ib_ctx,
+					       config->port_num);
+
+	in_mad_buf = malloc(sizeof(struct ib_user_mad) +
+			    node_table_response_size);
+	if (!in_mad_buf)
+		return -ENOMEM;
+
+	in_mad = (void *)in_mad_buf;
+	in_sa_mad = (void *)in_mad->data;
+	out_sa_mad = get_data_ptr(out_mad);
+
+	init_srp_sa_mad(&out_mad, umad_res->agent, umad_res->sm_lid,
+		        SRP_SA_ATTR_PATH_REC, 0);
+
+	/**
+	 * Due to OpenSM bug (issue #335016) SM won't return
+	 * table of all shared P_Keys, it will return only the first
+	 * shared P_Key, So we send path_rec over each P_Key in the P_Key
+	 * table. SM will return path record if P_Key is shared or else None.
+	 * Once SM bug will be fixed, this loop should be removed.
+	 **/
+	for (i = 0; ; i++) {
+		if (pkey_index_to_pkey(umad_res, i, &pkey))
+			break;
+		if (!pkey)
+			continue;
+
+		/* Mark components: DLID, SLID, PKEY */
+		out_sa_mad->comp_mask = htonll(1 << 4 | 1 << 5 | 1 << 13);
+		out_sa_mad->rmpp_version = 1;
+		out_sa_mad->rmpp_type = 1;
+		path_rec = (ib_path_rec_t *)out_sa_mad->data;
+		path_rec->slid = htons(local_port_lid);
+		path_rec->dlid = htons(dest_port_lid);
+		path_rec->pkey = htons(pkey);
+
+		len = send_and_get(umad_res->portid, umad_res->agent, &out_mad,
+				   (srp_ib_user_mad_t *)in_mad,
+				   node_table_response_size);
+		if (len < 0)
+			goto err;
+
+		size = ib_get_attr_size(in_sa_mad->attr_offset);
+		if (!size) {
+			if (config->verbose)
+				printf("PathRec Query did not find any targets "
+				       "over P_Key %x\n", pkey);
+			continue;
+		}
+
+		path_rec = (ib_path_rec_t *)in_sa_mad->data;
+		pkeys[num_pkeys++] = ntohs(path_rec->pkey);
+	}
+
+	free(in_mad_buf);
+	return num_pkeys;
+err:
+	free(in_mad_buf);
+	return -1;
+}
+
 static int do_dm_port_list(struct resources *res)
 {
 	struct umad_resources 	       *umad_res = res->umad_res;
-	uint8_t                         in_mad_buf[node_table_response_size];
+	uint8_t                        *in_mad_buf;
 	srp_ib_user_mad_t		out_mad;
 	struct ib_user_mad	       *in_mad;
 	struct srp_dm_rmpp_sa_mad      *out_sa_mad, *in_sa_mad;
 	struct srp_sa_port_info_rec    *port_info;
 	ssize_t len;
 	int size;
-	int i;
+	int i, j,num_pkeys;
+	uint16_t pkeys[SRP_MAX_SHARED_PKEYS];
 	uint64_t guid;
+
+	in_mad_buf = malloc(sizeof(struct ib_user_mad) +
+			    node_table_response_size);
+	if (!in_mad_buf)
+		return -ENOMEM;
 
 	in_mad     = (void *) in_mad_buf;
 	in_sa_mad  = (void *) in_mad->data;
@@ -937,33 +1151,47 @@ static int do_dm_port_list(struct resources *res)
 	port_info		   = (void *) out_sa_mad->data;
 	port_info->capability_mask = htonl(SRP_IS_DM); /* IsDM */
 
-	len = send_and_get(umad_res->portid, umad_res->agent, &out_mad, (srp_ib_user_mad_t *) in_mad, node_table_response_size);
-	if (len < 0)
+	len = send_and_get(umad_res->portid, umad_res->agent, &out_mad,
+			   (srp_ib_user_mad_t *) in_mad,
+			   node_table_response_size);
+	if (len < 0) {
+		free(in_mad_buf);
 		return len;
+	}
 
 	size = ib_get_attr_size(in_sa_mad->attr_offset);
-
 	if (!size) {
 		if (config->verbose) {
 			printf("Query did not find any targets\n");
 		}
+		free(in_mad_buf);
 		return 0;
 	}
 
 	for (i = 0; (i + 1) * size <= len - MAD_RMPP_HDR_SIZE; ++i) {
 		port_info = (void *) in_sa_mad->data + i * size;
-
 		if (get_node(umad_res, ntohs(port_info->endport_lid), &guid))
 			continue;
 
-		(void) do_port(res, ntohs(port_info->endport_lid),
-			       ntohll(port_info->subnet_prefix), guid);
+		num_pkeys = get_shared_pkeys(res, ntohs(port_info->endport_lid),
+					     pkeys);
+		if (num_pkeys < 0) {
+			pr_err("failed to get shared P_Keys with LID %x\n",
+			       ntohs(port_info->endport_lid));
+			free(in_mad_buf);
+			return num_pkeys;
+		}
+
+		for (j = 0; j < num_pkeys; ++j)
+			do_port(res, pkeys[j], ntohs(port_info->endport_lid),
+				ntohll(port_info->subnet_prefix), guid);
 	}
 
+	free(in_mad_buf);
 	return 0;
 }
 
-void handle_port(struct resources *res, uint16_t lid, uint64_t h_guid)
+void handle_port(struct resources *res, uint16_t pkey, uint16_t lid, uint64_t h_guid)
 {
 	struct umad_resources *umad_res = res->umad_res;
 	uint64_t subnet_prefix;
@@ -976,21 +1204,27 @@ void handle_port(struct resources *res, uint16_t lid, uint64_t h_guid)
 	if (!isdm)
 		return;
 
-	(void) do_port(res, lid, subnet_prefix, h_guid);
+	do_port(res, pkey, lid, subnet_prefix, h_guid);
 }
 
 
 static int do_full_port_list(struct resources *res)
 {
 	struct umad_resources 	       *umad_res = res->umad_res;
-	uint8_t                         in_mad_buf[node_table_response_size];
+	uint8_t                        *in_mad_buf;
 	srp_ib_user_mad_t		out_mad;
 	struct ib_user_mad	       *in_mad;
 	struct srp_dm_rmpp_sa_mad      *out_sa_mad, *in_sa_mad;
 	struct srp_sa_node_rec	       *node;
 	ssize_t len;
 	int size;
-	int i;
+	int i, j, num_pkeys;
+	uint16_t pkeys[SRP_MAX_SHARED_PKEYS];
+
+	in_mad_buf = malloc(sizeof(struct ib_user_mad) +
+			    node_table_response_size);
+	if (!in_mad_buf)
+		return -ENOMEM;
 
 	in_mad     = (void *) in_mad_buf;
 	in_sa_mad  = (void *) in_mad->data;
@@ -1004,19 +1238,34 @@ static int do_full_port_list(struct resources *res)
 	out_sa_mad->rmpp_version  = 1;
 	out_sa_mad->rmpp_type     = 1;
 
-	len = send_and_get(umad_res->portid, umad_res->agent, &out_mad, (srp_ib_user_mad_t *) in_mad, node_table_response_size);
-	if (len < 0)
+	len = send_and_get(umad_res->portid, umad_res->agent, &out_mad,
+			   (srp_ib_user_mad_t *) in_mad,
+			   node_table_response_size);
+	if (len < 0) {
+		free(in_mad_buf);
 		return len;
+	}
 
 	size = ntohs(in_sa_mad->attr_offset) * 8;
 
 	for (i = 0; (i + 1) * size <= len - MAD_RMPP_HDR_SIZE; ++i) {
 		node = (void *) in_sa_mad->data + i * size;
 
-		(void) handle_port(res, ntohs(node->lid), 
-			    ntohll(node->port_guid));
+		num_pkeys = get_shared_pkeys(res, ntohs(node->lid),
+					     pkeys);
+		if (num_pkeys < 0) {
+			pr_err("failed to get shared P_Keys with LID %x\n",
+			       ntohs(node->lid));
+			free(in_mad_buf);
+			return num_pkeys;
+		}
+
+		for (j = 0; j < num_pkeys; ++j)
+			(void) handle_port(res, pkeys[j], ntohs(node->lid),
+					   ntohll(node->port_guid));
 	}
 
+	free(in_mad_buf);
 	return 0;
 }
 
@@ -1051,7 +1300,7 @@ static void print_config(struct config_t *conf)
 	else
 		printf(" Do not retry to connect to existing targets\n");
 	printf(" ------------------------------------------------\n");
-}		
+}
 
 static char *copy_till_comma(char *d, char *s, int len, int base)
 {
@@ -1077,18 +1326,97 @@ static char *copy_till_comma(char *d, char *s, int len, int base)
 	return s;
 }
 
+static char *parse_main_option(struct rule *rule, char *ptr)
+{
+	struct option_info {
+		const char *name;
+		size_t offset;
+		size_t len;
+		int base;
+	};
+#define OPTION_INFO(n, base) { #n "=", offsetof(struct rule, n),	\
+			sizeof(((struct rule *)NULL)->n), base}
+	static const struct option_info opt_info[] = {
+		OPTION_INFO(id_ext, 16),
+		OPTION_INFO(ioc_guid, 16),
+		OPTION_INFO(dgid, 16),
+		OPTION_INFO(service_id, 16),
+		OPTION_INFO(pkey, 16),
+	};
+	int i, optnamelen;
+	char *ptr2 = NULL;
+
+	for (i = 0; i < sizeof(opt_info) / sizeof(opt_info[0]); i++) {
+		optnamelen = strlen(opt_info[i].name);
+		if (strncmp(ptr, opt_info[i].name, optnamelen) == 0) {
+			ptr2 = copy_till_comma((char *)rule
+					       + opt_info[i].offset,
+					       ptr + optnamelen,
+					       opt_info[i].len - 1,
+					       opt_info[i].base);
+			break;
+		}
+	}
+
+	return ptr2;
+}
+
+/*
+ * Return values:
+ *  -1 if the output buffer is not large enough.
+ *   0 if an unsupported option has been encountered.
+ * > 0 if parsing succeeded.
+ */
+static int parse_other_option(struct rule *rule, char *ptr)
+{
+	static const char *const opt[] = {
+		"comp_vector=",
+		"max_cmd_per_lun=",
+		"max_sect=",
+		"queue_size=",
+		"tl_retry_count=",
+	};
+
+	char *ptr2 = NULL, *optr, option[17];
+	int i, optnamelen, len, left;
+
+	optr = rule->options;
+	left = sizeof(rule->options);
+	len = strlen(optr);
+	optr += len;
+	left -= len;
+	for (i = 0; i < sizeof(opt)/sizeof(opt[0]); ++i) {
+		optnamelen = strlen(opt[i]);
+		if (strncmp(ptr, opt[i], optnamelen) != 0)
+			continue;
+		ptr2 = copy_till_comma(option, ptr + optnamelen,
+				       sizeof(option) - 1, 10);
+		if (!ptr2)
+			return -1;
+		len = snprintf(optr, left, ",%s%s", opt[i], option);
+		optr += len;
+		left -= len;
+		if (left <= 0)
+			return -1;
+		break;
+	}
+	return ptr2 ? ptr2 - ptr : 0;
+}
+
 static int get_rules_file(struct config_t *conf)
 {
-	int line_number = 1, len, line_number_for_output;
-	char line[255], option[17];
-	char *ptr, *ptr2, *optr;
-	FILE *infile=fopen(conf->rules_file, "r");
+	int line_number = 1, len, line_number_for_output, ret = -1;
+	char line[255];
+	char *ptr, *ptr2;
+	struct rule *rule;
+	FILE *infile = fopen(conf->rules_file, "r");
 
 	if (infile == NULL) {
-		pr_err("Could not find rules file %s\n", conf->rules_file);
-		return -1;
+		pr_debug("Could not find rules file %s, going with default\n",
+			 conf->rules_file);
+		return 0;
 	}
-	
+
 	while (fgets(line, sizeof(line), infile) != NULL) {
 		if (line[0] != '#' && line[0] != '\n')
 			line_number++;
@@ -1096,91 +1424,64 @@ static int get_rules_file(struct config_t *conf)
 
 	if (fseek(infile, 0L, SEEK_SET) != 0) {
 		pr_err("internal error while seeking %s\n", conf->rules_file);
-		return -1;
+		goto out;
 	}
 
 	conf->rules = malloc(sizeof(struct rule) * line_number);
 
-	line_number = -1;
+	rule = &conf->rules[0] - 1;
 	line_number_for_output = 0;
 	while (fgets(line, sizeof(line), infile) != NULL) {
 		line_number_for_output++;
 		if (line[0] == '#' || line[0] == '\n')
 			continue;
 
-		line_number++;
+		rule++;
 		switch (line[0]) {
 		case 'a':
 		case 'A':
-			conf->rules[line_number].allow = 1;
+			rule->allow = 1;
 			break;
 		case 'd':
 		case 'D':
-			conf->rules[line_number].allow = 0;
+			rule->allow = 0;
 			break;
 		default:
 			pr_err("Bad syntax in rules file %s line %d:"
-			       " line should start with 'a' or 'd'\n", 
+			       " line should start with 'a' or 'd'\n",
 			       conf->rules_file, line_number_for_output);
-			return -1;
+			goto out;
 		}
 
-		conf->rules[line_number].id_ext[0]='\0';
-		conf->rules[line_number].ioc_guid[0]='\0';
-		conf->rules[line_number].dgid[0]='\0';
-		conf->rules[line_number].service_id[0]='\0';
-		conf->rules[line_number].options[0]='\0';
+		rule->id_ext[0] = '\0';
+		rule->ioc_guid[0] = '\0';
+		rule->dgid[0] = '\0';
+		rule->service_id[0] = '\0';
+		rule->pkey[0] = '\0';
+		rule->options[0] = '\0';
 
 		ptr = &line[1];
 		while (*ptr == ' ' || *ptr == '\t')
 			ptr++;
 
-		optr = conf->rules[line_number].options;
 		while (*ptr != '\n') {
-			ptr2 = NULL;
-			if (strncmp(ptr, "id_ext=", 7) == 0)
-				ptr2 = copy_till_comma(
-					conf->rules[line_number].id_ext, 
-					ptr+7, 16, 16); 
-
-			else if (strncmp(ptr, "ioc_guid=", 9) == 0)
-				ptr2 = copy_till_comma(
-					conf->rules[line_number].ioc_guid, 
-					ptr+9, 16, 16); 
-				
-			else if (strncmp(ptr, "dgid=", 5) == 0)
-				ptr2 = copy_till_comma(
-					conf->rules[line_number].dgid, 
-					ptr+5, 32, 16); 
-
-			else if (strncmp(ptr, "service_id=", 11) == 0)
-				ptr2 = copy_till_comma(
-					conf->rules[line_number].service_id, 
-					ptr+11, 16, 16); 
-
-			else if (conf->rules[line_number].allow) {
-
-				if (strncmp(ptr, "max_sect=", 9) == 0) {
-					ptr2 = copy_till_comma(option, ptr+9, 16, 10); 
-					if (ptr2) {
-						len = sprintf(optr, ",max_sect=%s", option);
-						optr += len;
-					}
+			ptr2 = parse_main_option(rule, ptr);
+			if (!ptr2 && rule->allow) {
+				len = parse_other_option(rule, ptr);
+				if (len < 0) {
+					pr_err("Buffer overflow triggered by"
+					       " rules file %s line %d\n",
+					       conf->rules_file,
+					       line_number_for_output);
+					goto out;
 				}
-
-				else if (strncmp(ptr, "max_cmd_per_lun=", 16) == 0) {
-					ptr2 = copy_till_comma(option, ptr+16, 16, 10); 
-					if (ptr2) {
-						len = sprintf(optr, ",max_cmd_per_lun=%s", option);
-						optr += len;
-					}
-				}
+				ptr2 = len ? ptr + len : NULL;
 			}
 
 			if (ptr2 == NULL) {
 				pr_err("Bad syntax in rules file %s line %d\n",
 				       conf->rules_file, line_number_for_output);
-				return -1;
+				goto out;
 			}
 			ptr = ptr2;
 
@@ -1188,15 +1489,20 @@ static int get_rules_file(struct config_t *conf)
 				ptr++;
 		}
 	}
-	line_number++;
-	conf->rules[line_number].id_ext[0]='\0';
-	conf->rules[line_number].ioc_guid[0]='\0';
-	conf->rules[line_number].dgid[0]='\0';
-	conf->rules[line_number].service_id[0]='\0';
-	conf->rules[line_number].options[0]='\0';
-	conf->rules[line_number].allow = 1;
-	
-	return 0;
+	rule++;
+	rule->id_ext[0] = '\0';
+	rule->ioc_guid[0] = '\0';
+	rule->dgid[0] = '\0';
+	rule->service_id[0] = '\0';
+	rule->pkey[0] = '\0';
+	rule->options[0] = '\0';
+	rule->allow = 1;
+	ret = 0;
+
+out:
+	fclose(infile);
+
+	return ret;
 }
 
 static int get_config(struct config_t *conf, int argc, char *argv[])
@@ -1205,7 +1511,6 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 	char* umad_dev   = "/dev/infiniband/umad0";
 	char *ibport;
 	int ret;
-	int len;
 
 	conf->port_num			= 1;
 	conf->num_of_oust		= 10;
@@ -1224,11 +1529,12 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 	conf->print_initiator_ext	= 0;
 	conf->rules_file		= "/etc/srp_daemon.conf";
 	conf->rules			= NULL;
+	conf->tl_retry_count		= 0;
 
 	while (1) {
 		int c;
 
-		c = getopt(argc, argv, "caveod:i:p:t:r:R:T:Vhnf:");
+		c = getopt(argc, argv, "caveod:i:p:t:r:R:T:l:Vhnf:");
 		if (c == -1)
 			break;
 
@@ -1236,14 +1542,12 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 		case 'd':
 			umad_dev = optarg;
 			break;
-		case 'i':		  
-			len = strlen(optarg)+1;
-			conf->dev_name = malloc(len);
+		case 'i':
+			conf->dev_name = strdup(optarg);
 			if (!conf->dev_name) {
 				pr_err("Fail to alloc space for dev_name\n");
 				return -ENOMEM;
 			}
-			strncpy(conf->dev_name, optarg, len);
 			break;
 		case 'p':
 			conf->port_num = atoi(optarg);
@@ -1304,6 +1608,16 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 		case 'f':
 			conf->rules_file = optarg;
 			break;
+		case 'l':
+			conf->tl_retry_count = atoi(optarg);
+			if (conf->tl_retry_count < 2 ||
+			    conf->tl_retry_count > 7) {
+				pr_err("Bad tl_retry_count argument (%d), "
+				       "must be 2 <= tl_retry_count <= 7\n",
+				       conf->tl_retry_count);
+				return -1;
+			}
+			break;
 		case 'h':
 		default:
 			usage(argv[0]);
@@ -1335,7 +1649,7 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 		pr_err("error while allocating add_target\n");
 		return ret;
 	}
-		 
+
 	if (get_rules_file(conf))
 		return -1;
 
@@ -1344,11 +1658,9 @@ static int get_config(struct config_t *conf, int argc, char *argv[])
 
 static void config_destroy(struct config_t *conf)
 {
-	if (conf->dev_name)
-		free(conf->dev_name);
-
-	if (conf->add_target_file)
-		free(conf->add_target_file);
+	free(conf->dev_name);
+	free(conf->add_target_file);
+	free(conf->rules);
 }
 
 static void umad_resources_init(struct umad_resources *umad_res)
@@ -1364,11 +1676,11 @@ static void umad_resources_destroy(struct umad_resources *umad_res)
 	if (umad_res->port_sysfs_path)
 		free(umad_res->port_sysfs_path);
 
-	if (umad_res->agent != -1)
-		umad_unregister(umad_res->portid, umad_res->agent);
-
-	if (umad_res->agent != -1)
-		umad_unregister(umad_res->portid, umad_res->agent);
+	if (umad_res->portid >= 0) {
+		if (umad_res->agent >= 0)
+			umad_unregister(umad_res->portid, umad_res->agent);
+		umad_close_port(umad_res->portid);
+	}
 
 	umad_done();
 }
@@ -1388,14 +1700,14 @@ static int umad_resources_create(struct umad_resources *umad_res)
 
 	umad_res->portid = umad_open_port(config->dev_name, config->port_num);
 	if (umad_res->portid < 0) {
-		pr_err("umad_open_port failed for device %s port %d\n", 
+		pr_err("umad_open_port failed for device %s port %d\n",
 		       config->dev_name, config->port_num);
 		return -ENXIO;
 	}
 
-	umad_res->agent = umad_register(umad_res->portid, SRP_MGMT_CLASS_SA, 
-					   SRP_MGMT_CLASS_SA_VERSION, 
-					   SRP_SA_RMPP_VERSION, 0); 
+	umad_res->agent = umad_register(umad_res->portid, SRP_MGMT_CLASS_SA,
+					   SRP_MGMT_CLASS_SA_VERSION,
+					   SRP_SA_RMPP_VERSION, 0);
 	if (umad_res->agent < 0) {
 		pr_err("umad_register failed\n");
 		return umad_res->agent;
@@ -1434,53 +1746,256 @@ void *run_thread_retry_to_connect(void *res_in)
 
 	pr_debug("retry_to_connect thread ended\n");
 
-	pthread_exit((void *)0);
+	pthread_exit(NULL);
+}
+
+static void free_res(struct resources *res)
+{
+	void *status;
+
+	if (!res)
+		return;
+
+	if (res->sync_res) {
+		pthread_mutex_lock(&res->sync_res->retry_mutex);
+		res->sync_res->stop_threads = 1;
+		pthread_cond_signal(&res->sync_res->retry_cond);
+		pthread_mutex_unlock(&res->sync_res->retry_mutex);
+	}
+
+	if (res->ud_res)
+		modify_qp_to_err(res->ud_res->qp);
+
+	if (res->reconnect_thread) {
+		pthread_kill(res->reconnect_thread, SIGINT);
+		pthread_join(res->reconnect_thread, &status);
+	}
+	if (res->async_ev_thread) {
+		pthread_kill(res->async_ev_thread, SIGINT);
+		pthread_join(res->async_ev_thread, &status);
+	}
+	if (res->trap_thread) {
+		pthread_kill(res->trap_thread, SIGINT);
+		pthread_join(res->trap_thread, &status);
+	}
+	if (res->sync_res)
+		sync_resources_cleanup(res->sync_res);
+	if (res->ud_res)
+		ud_resources_destroy(res->ud_res);
+	if (res->umad_res)
+		umad_resources_destroy(res->umad_res);
+	free(res);
+}
+
+static struct resources *alloc_res(void)
+{
+	struct all_resources {
+		struct resources	res;
+		struct ud_resources	ud_res;
+		struct umad_resources	umad_res;
+		struct sync_resources	sync_res;
+	};
+
+	struct all_resources *res;
+	int ret;
+
+	res = calloc(1, sizeof(*res));
+	if (!res)
+		goto err;
+
+	umad_resources_init(&res->umad_res);
+	ret = umad_resources_create(&res->umad_res);
+	if (ret)
+		goto err;
+	res->res.umad_res = &res->umad_res;
+
+	ud_resources_init(&res->ud_res);
+	ret = ud_resources_create(&res->ud_res);
+	if (ret)
+		goto err;
+	res->res.ud_res = &res->ud_res;
+
+	ret = sync_resources_init(&res->sync_res);
+	if (ret)
+		goto err;
+	res->res.sync_res = &res->sync_res;
+
+	if (!config->once) {
+		ret = pthread_create(&res->res.trap_thread, NULL,
+				     run_thread_get_trap_notices, &res->res);
+		if (ret)
+			goto err;
+	}
+
+	ret = pthread_create(&res->res.async_ev_thread, NULL,
+			     run_thread_listen_to_events, &res->res);
+	if (ret)
+		goto err;
+
+	if (config->retry_timeout && !config->once) {
+		ret = pthread_create(&res->res.reconnect_thread, NULL,
+				     run_thread_retry_to_connect, &res->res);
+		if (ret)
+			goto err;
+	}
+
+	return &res->res;
+err:
+	if (res)
+		free_res(&res->res);
+	return NULL;
+}
+
+/* *c = *a - *b. See also the BSD macro timersub(). */
+static void ts_sub(const struct timespec *a, const struct timespec *b,
+		   struct timespec *res)
+{
+	res->tv_sec = a->tv_sec - b->tv_sec;
+	res->tv_nsec = a->tv_nsec - b->tv_nsec;
+	if (res->tv_nsec < 0) {
+		res->tv_sec--;
+		res->tv_nsec += 1000 * 1000 * 1000;
+	}
+}
+
+static int ibsrpdm(int argc, char *argv[])
+{
+	char* umad_dev = "/dev/infiniband/umad0";
+	char* ibport;
+	struct resources *res;
+	int ret;
+
+	s_log_dest = log_to_stderr;
+
+	config = calloc(1, sizeof(*config));
+	config->num_of_oust = 10;
+	config->timeout = 5000;
+	config->mad_retries = 3;
+	config->all = 1;
+
+	while (1) {
+		int c;
+
+		c = getopt(argc, argv, "cd:h:v");
+		if (c == -1)
+			break;
+
+		switch (c) {
+		case 'c':
+			++config->cmd;
+			break;
+		case 'd':
+			umad_dev = optarg;
+			break;
+		case 'v':
+			++config->debug_verbose;
+			break;
+		case 'h':
+		default:
+			fprintf(stderr,
+				"Usage: %s [-vc] [-d <umad device>]\n",
+				argv[0]);
+			return 1;
+		}
+	}
+
+	initialize_sysfs();
+
+	if (translate_umad_to_ibdev_and_port(umad_dev, &config->dev_name,
+					     &ibport)) {
+		pr_err("Fail to translate umad to ibdev and port\n");
+		return 1;
+	}
+	config->port_num = atoi(ibport);
+	free(ibport);
+
+	umad_init();
+	res = alloc_res();
+	if (!res) {
+		ret = 1;
+		pr_err("Resource allocation failed\n");
+		goto umad_done;
+	}
+	ret = recalc(res);
+	if (ret)
+		pr_err("Querying SRP targets failed\n");
+
+	assert(res->sync_res);
+	pthread_mutex_lock(&res->sync_res->retry_mutex);
+	res->sync_res->stop_threads = 1;
+	pthread_cond_signal(&res->sync_res->retry_cond);
+	pthread_mutex_unlock(&res->sync_res->retry_mutex);
+
+	free_res(res);
+umad_done:
+	umad_done();
+
+	free(config);
+
+	return ret;
 }
 
 int main(int argc, char *argv[])
 {
-	pthread_t 		thread[4];
-	int			ret;
-	struct resources	res;
-	int                     thread_id[4];
-	uint16_t 		lid; 
-	ib_gid_t 		gid; 
+	int			ret, i, flags;
+	struct resources       *res;
+	uint16_t 		lid;
+	uint16_t 		pkey;
+	ib_gid_t 		gid;
 	struct target_details  *target;
-	int		       *status;
-	int 			i;
+	struct sigaction	sa;
+	int			subscribed = 0;
+	int			lockfd;
 
-	for (i = 0; i < 4; ++i)
-		thread_id[i] = -1;
+	STATIC_ASSERT(sizeof(struct srp_dm_mad) == 256);
+	STATIC_ASSERT(sizeof(struct srp_dm_rmpp_sa_mad) == 256);
+	STATIC_ASSERT(sizeof(struct srp_sa_node_rec) == 108);
+	STATIC_ASSERT(sizeof(struct srp_sa_port_info_rec) == 58);
+	STATIC_ASSERT(sizeof(struct srp_class_port_info) == 72);
+	STATIC_ASSERT(sizeof(struct srp_dm_iou_info) == 132);
+	STATIC_ASSERT(sizeof(struct srp_dm_ioc_prof) == 128);
 
-	res.umad_res = malloc(sizeof(struct umad_resources));
-	if (!res.umad_res) {
- 		pr_err("out of memory\n");
-		return ENOMEM;
-	}	  
-	res.ud_res = malloc(sizeof(struct ud_resources));
-	if (!res.ud_res) {
- 		pr_err("out of memory\n");
-		ret = ENOMEM;
-		goto free_umad;
-	}	  
+	ret = pipe(wakeup_pipe);
+	if (ret < 0) {
+		pr_err("could not create pipe\n");
+		goto out;
+	}
+	for (i = 0; i < 2; i++) {
+		flags = fcntl(wakeup_pipe[i], F_GETFL);
+		fcntl(wakeup_pipe[i], F_SETFL, flags | O_NONBLOCK);
+	}
 
-	res.sync_res = malloc(sizeof(struct sync_resources));
-	if (!res.sync_res) {
- 		pr_err("out of memory\n");
-		ret = ENOMEM;
-		goto free_res;
-	}	  
+	/*
+	 * signal_handler() may be invoked on the context of any thread.
+	 * Avoid that data race detection tools complain about this.
+	 */
+	ANNOTATE_BENIGN_RACE_SIZED(&received_signal, sizeof(received_signal),
+				   "");
+
+	memset(&sa, 0, sizeof(sa));
+	sigemptyset(&sa.sa_mask);
+	sa.sa_handler = signal_handler;
+	sigaction(SIGINT, &sa, 0);
+	sigaction(SIGTERM, &sa, 0);
+
+	if (strcmp(argv[0] + max_t(int, 0, strlen(argv[0]) - strlen("ibsrpdm")),
+		   "ibsrpdm") == 0) {
+		ret = ibsrpdm(argc, argv);
+		goto close_pipe;
+	}
+
+	openlog("srp_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
 
 	config = malloc(sizeof(*config));
 	if (!config) {
  		pr_err("out of memory\n");
 		ret = ENOMEM;
-		goto free_sync;
+		goto close_log;
 	}
 
 	if (get_config(config, argc, argv)) {
 		ret = EINVAL;
-		goto free_all;
+		goto free_config;
 	}
 
 	if (config->verbose)
@@ -1489,164 +2004,167 @@ int main(int argc, char *argv[])
 	ret = umad_init();
 	if (ret < 0) {
 		pr_err("umad_init failed\n");
-		ret = -ret;
 		goto clean_config;
 	}
 
-	umad_resources_init(res.umad_res);
-	ret = umad_resources_create(res.umad_res);
-	if (ret)
+	res = alloc_res();
+	if (!res)
 		goto clean_umad;
 
 	if (config->once) {
-		ret = recalc(&res);
-		goto clean_umad;
-	}
-	  
-	ud_resources_init(res.ud_res);
-	ret = ud_resources_create(res.ud_res);
-	if (ret) 
-		goto clean_all;
-
-	ret = sync_resources_init(res.sync_res);
-	if (ret) 
-		goto clean_all;
-
-	if (!config->once) {
-		thread_id[0] = pthread_create(&thread[0], NULL, run_thread_get_trap_notices, (void *) &res);
-		if (thread_id[0] < 0) {
-			ret=thread_id[0];
-			goto clean_all;
-		}
+		ret = recalc(res);
+		goto free_res;
 	}
 
-	thread_id[1] = pthread_create(&thread[1], NULL, run_thread_listen_to_events, (void *) &res);
-	if (thread_id[1] < 0) {
-		ret=thread_id[1];
-		goto kill_threads;
+	lockfd = check_process_uniqueness(config);
+	if (lockfd < 0) {
+		ret = EPERM;
+		goto free_res;
 	}
 
-	if (config->recalc_time && !config->once) {
-		thread_id[2] = pthread_create(&thread[2], NULL, run_thread_wait_till_timeout, (void *) &res);
-		if (thread_id[2] < 0) {
-			ret=thread_id[2];
-			goto kill_threads;
-		}
-	}
+	while (received_signal == 0) {
+		pthread_mutex_lock(&res->sync_res->mutex);
+		if (__rescan_scheduled(res->sync_res)) {
+			uint16_t port_lid;
 
-	if (config->retry_timeout && !config->once) {
-		thread_id[3] = pthread_create(&thread[3], NULL, 
-					      run_thread_retry_to_connect, 
-					      (void *) &res);
-		if (thread_id[3] < 0) {
-			ret=thread_id[3];
-			goto kill_threads;
-		}
-	}
+			pthread_mutex_unlock(&res->sync_res->mutex);
 
-	while (1) {
-		pthread_mutex_lock(&res.sync_res->mutex);
-		if (res.sync_res->recalc) {
-			pthread_mutex_unlock(&res.sync_res->mutex);		  
 			pr_debug("Starting a recalculation\n");
-			ret = create_ah(res.ud_res);
-			if (ret) 
-				goto kill_threads;
-			
-			if (register_to_traps(res.ud_res))
-				pr_err("Fail to register to traps, maybe there is no opensm running on fabric\n");
+			port_lid = get_port_lid(res->ud_res->ib_ctx,
+					   config->port_num);
+			if (port_lid != res->ud_res->port_attr.lid) {
+				if (res->ud_res->ah) {
+					ibv_destroy_ah(res->ud_res->ah);
+					res->ud_res->ah = NULL;
+				}
+				ret = create_ah(res->ud_res);
+				if (ret)
+					goto kill_threads;
+			}
 
-			clear_traps_list(res.sync_res);
-			res.sync_res->next_recalc_time = time(NULL) + config->recalc_time;
-			res.sync_res->recalc = 0;
+			if (res->ud_res->ah) {
+				if (register_to_traps(res, 1))
+					pr_err("Fail to register to traps, maybe there "
+					       "is no opensm running on fabric or IB port is down\n");
+				else
+					subscribed = 1;
+			}
+
+			clear_traps_list(res->sync_res);
+			schedule_rescan(res->sync_res, config->recalc_time ?
+					config->recalc_time : -1);
 
 			/* empty retry_list */
-			pthread_mutex_lock(&res.sync_res->retry_mutex);
-			while ((target = pop_from_retry_list(res.sync_res)))
+			pthread_mutex_lock(&res->sync_res->retry_mutex);
+			while ((target = pop_from_retry_list(res->sync_res)))
 				free(target);
-			pthread_mutex_unlock(&res.sync_res->retry_mutex);
+			pthread_mutex_unlock(&res->sync_res->retry_mutex);
 
-			ret = recalc(&res);
-			if (ret) 
-				goto kill_threads;
-		} else if (pop_from_list(res.sync_res, &lid, &gid)) {
-			pthread_mutex_unlock(&res.sync_res->mutex);
+			recalc(res);
+		} else if (pop_from_list(res->sync_res, &lid, &gid, &pkey)) {
+			pthread_mutex_unlock(&res->sync_res->mutex);
 			if (lid) {
 				uint64_t guid;
-				ret = get_node(res.umad_res, lid, &guid);
+				ret = get_node(res->umad_res, lid, &guid);
 				if (ret)
 					/* unexpected error - do a full rescan */
-					res.sync_res->recalc = 1;
+					schedule_rescan(res->sync_res, 0);
 				else
-					handle_port(&res, lid, guid);
+					handle_port(res, pkey, lid, guid);
 			} else {
-				ret = get_lid(res.umad_res, &gid, &lid);
+				ret = get_lid(res->umad_res, &gid, &lid);
 				if (ret < 0)
 					/* unexpected error - do a full rescan */
-					res.sync_res->recalc = 1;
+					schedule_rescan(res->sync_res, 0);
 				else {
 					pr_debug("lid is %d\n", lid);
 
 					srp_sleep(0, 100);
-					handle_port(&res, lid,
+					handle_port(res, pkey, lid,
 						    ntohll(ib_gid_get_guid(&gid)));
 				}
 			}
 		} else {
-			pthread_cond_wait(&res.sync_res->cond, &res.sync_res->mutex);
-			pthread_mutex_unlock(&res.sync_res->mutex);
+			int fd;
+			fd_set rset;
+			char buf[16];
+			struct timespec now, delta;
+			struct timeval timeout;
+
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			ts_sub(&res->sync_res->next_recalc_time, &now, &delta);
+			pthread_mutex_unlock(&res->sync_res->mutex);
+
+			if (delta.tv_sec > 0 ||
+			    (delta.tv_sec == 0 && delta.tv_nsec > 0)) {
+				timeout.tv_sec = delta.tv_sec;
+				timeout.tv_usec = delta.tv_nsec / 1000 + 1;
+			} else {
+				timeout.tv_sec = 0;
+				timeout.tv_usec = 0;
+			}
+			fd = wakeup_pipe[0];
+			FD_ZERO(&rset);
+			FD_SET(fd, &rset);
+			ret = select(fd + 1, &rset, NULL, NULL, &timeout);
+			if (ret < 0)
+				assert(errno == EINTR);
+			while (read(fd, buf, sizeof(buf)) > 0)
+				;
 		}
 	}
 
 	ret = 0;
 
 kill_threads:
-	/* 
-	 * Currently there is a known bug with the termination:
-	 * 1) The threads are sleeping on poll_cq or on events
-	 * 2) It is impossible to destroy the resources without waiting for
-	 *    the threads to finish.
-	 * Therefore for now we just exit.
-	 */
+	switch (received_signal) {
+	case SIGINT:
+		pr_err("Got SIGINT\n");
+		break;
+	case SIGTERM:
+		pr_err("Got SIGTERM\n");
+		break;
+	case 0:
+		break;
+	default:
+		pr_err("Got SIG???\n");
+		break;
+	}
 
-	exit(-ret);
-
-	res.sync_res->stop_threads = 1;
-	/* 
-	 * There is a chance that retry_to_connect thread is on a wait for 
-	 * retry_cond. So we send here a signal to end the wait, so the thread
-	 * can end.
-	 */
-	pthread_cond_signal(&res.sync_res->retry_cond);
-	for (i = 0; i < 4; ++i)
-		if (thread_id[i] >= 0)
-			pthread_join(thread_id[i], (void **)&status);
-clean_all:
-	ud_resources_destroy(res.ud_res);
+	if (subscribed)
+		/* Traps deregistration before exiting */
+		register_to_traps(res, 0);
+	close(lockfd);
+free_res:
+	free_res(res);
 clean_umad:
-	umad_resources_destroy(res.umad_res);
+	umad_done();
 clean_config:
 	config_destroy(config);
-free_all:
+free_config:
 	free(config);
-free_sync:
-	free(res.sync_res);
-free_res:
-	free(res.ud_res);
-free_umad:
-	free(res.umad_res);
-
-	exit(-ret);
+close_log:
+	closelog();
+close_pipe:
+	sa.sa_handler = SIG_DFL;
+	sigaction(SIGINT, &sa, 0);
+	sigaction(SIGTERM, &sa, 0);
+	close(wakeup_pipe[1]);
+	close(wakeup_pipe[0]);
+	wakeup_pipe[0] = -1;
+	wakeup_pipe[1] = -1;
+out:
+	exit(ret ? 1 : 0);
 }
 
-int recalc(struct resources *res)
+static int recalc(struct resources *res)
 {
 	struct umad_resources *umad_res = res->umad_res;
 	int  mask_match;
-	char val[6];
+	char val[7];
 	int ret;
 
-	ret = srpd_sys_read_string(umad_res->port_sysfs_path, "sm_lid", val, sizeof val); 
+	ret = srpd_sys_read_string(umad_res->port_sysfs_path, "sm_lid", val, sizeof val);
 	if (ret < 0) {
 		pr_err("Couldn't read SM LID\n");
 		return ret;
@@ -1673,7 +2191,7 @@ int recalc(struct resources *res)
 	return ret;
 }
 
-int get_lid(struct umad_resources *umad_res, ib_gid_t *gid, uint16_t *lid)
+static int get_lid(struct umad_resources *umad_res, ib_gid_t *gid, uint16_t *lid)
 {
 	srp_ib_user_mad_t		out_mad, in_mad;
 	struct srp_dm_rmpp_sa_mad 	*in_sa_mad  = get_data_ptr(in_mad);

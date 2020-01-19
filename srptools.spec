@@ -1,19 +1,19 @@
 Name: srptools
-Version: 0.0.4
-Release: 18%{?dist}
+Version: 1.0.2
+Release: 1%{?dist}
 Summary: Tools for using the InfiniBand SRP protocol devices
 Group: System Environment/Base
 License: GPLv2 or BSD
-Url: http://www.openfabrics.org/
+Url: https://www.openfabrics.org/
 
-Source0: http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.1.gce1f64c.tar.gz
+Source0: https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}.tar.gz
 Source1: srptools.init
 Source2: srptools.service
 BuildRequires: libibumad-devel, libibverbs-devel > 1.1.3, systemd
 Requires(pre): systemd
 Requires(preun): systemd
 Requires(postun): systemd
-ExcludeArch: s390 s390x
+ExcludeArch: s390
 Obsoletes: openib-srptools <= 0.0.6
 
 %description
@@ -34,10 +34,11 @@ Backward compatible SysV Init script for srptools package
 
 %build
 %configure
-make CFLAGS="$CFLAGS -fno-strict-aliasing" %{?_smp_mflags}
+make CFLAGS="$CXXFLAGS -fno-strict-aliasing" %{?_smp_mflags}
 
 %install
 make DESTDIR=%{buildroot} install
+rm -f %{buildroot}/etc/init.d/srpd
 install -p -m 755 -D %{SOURCE1} %{buildroot}%{_initrddir}/srpd
 install -p -m 755 -D %{SOURCE2} %{buildroot}%{_unitdir}/srpd.service
 
@@ -64,6 +65,8 @@ fi
 %files
 %defattr(-,root,root)
 %config(noreplace) %{_sysconfdir}/srp_daemon.conf
+%config(noreplace) %{_sysconfdir}/logrotate.d/srp_daemon
+%config(noreplace) %{_sysconfdir}/rsyslog.d/srp_daemon.conf
 %{_unitdir}/srpd.service
 %{_sbindir}/ibsrpdm
 %{_sbindir}/srp_daemon
@@ -78,6 +81,10 @@ fi
 %{_initrddir}/srpd
 
 %changelog
+* Fri Jul 17 2015 Doug Ledford <dledford@redhat.com> - 1.0.2-1
+- Update to latest upstream release
+- Resolves: bz1061931
+
 * Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 0.0.4-18
 - Mass rebuild 2013-12-27
 
